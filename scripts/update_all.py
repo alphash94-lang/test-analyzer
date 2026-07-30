@@ -115,13 +115,17 @@ def build_steps(
             arguments=("--as-of", as_of),
         ),
     ]
-    steps.extend(
-        UpdateStep(
-            name=f"events_{symbol}",
-            module="scripts.update_phase5_events",
-            arguments=("--symbol", symbol, "--as-of", as_of),
-        )
+    event_arguments = tuple(
+        argument
         for symbol in symbols
+        for argument in ("--symbol", symbol)
+    ) + ("--as-of", as_of)
+    steps.append(
+        UpdateStep(
+            name="events_watchlist",
+            module="scripts.update_phase5_watchlist",
+            arguments=event_arguments,
+        )
     )
     steps.append(
         UpdateStep(

@@ -34,10 +34,17 @@ def test_update_all_builds_provider_steps_in_dependency_order() -> None:
         "stock_master",
         "daily_prices",
         "daily_index",
-        "events_005930",
-        "events_000660",
+        "events_watchlist",
         "ecos_macro",
     ]
+    assert steps[-2].arguments == (
+        "--symbol",
+        "005930",
+        "--symbol",
+        "000660",
+        "--as-of",
+        "2026-07-29",
+    )
     assert steps[-1].arguments == (
         "--start",
         "2026-06-29",

@@ -15,6 +15,7 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/raw/
+data/backups/
 dist/
 build/
 *.egg-info/
