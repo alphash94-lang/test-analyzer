@@ -23,6 +23,7 @@ from app.models.events import (
     KisProgramTradingItem,
     KisShortSellingItem,
     NaverNewsItem,
+    NaverNewsPage,
     TextScope,
 )
 from app.models.metadata import (
@@ -101,6 +102,99 @@ def test_news_after_analysis_date_is_not_normalized() -> None:
         item,
         as_of_date=date(2026, 7, 29),
     ) is False
+
+
+def test_refresh_uses_official_abbreviated_name_for_news(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "news-abbreviation.db", monkeypatch)
+    settings = make_settings(
+        database_url=database_url,
+        raw_data_dir=tmp_path / "raw",
+    )
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    collected_at = datetime(2026, 7, 29, 18, 0, tzinfo=SEOUL)
+    with sessions.begin() as session:
+        stock = _stock(collected_at)
+        stock.name_ko = "삼성전자보통주"
+        stock.abbreviated_name = "삼성전자"
+        session.add(stock)
+
+    item = NaverNewsItem.model_validate(
+        {
+            "title": "삼성전자, 신제품 공개",
+            "originallink": "https://news.example.test/samsung",
+            "link": "https://n.news.naver.com/article/001/10",
+            "description": "삼성전자 관련 제공 요약",
+            "pubDate": "Wed, 29 Jul 2026 09:15:00 +0900",
+        }
+    )
+
+    class AbbreviatedNameNewsProvider:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def fetch_news(
+            self,
+            *,
+            query: str,
+            display: int,
+            sort: str,
+        ) -> ApiResponse[NaverNewsPage]:
+            del display, sort
+            self.queries.append(query)
+            return ApiResponse(
+                state=DataState.AVAILABLE,
+                metadata=DataMetadata(
+                    provider="Naver API HUB",
+                    function_name="네이버 뉴스 검색 API",
+                    state=DataState.AVAILABLE,
+                    as_of_at=item.published_at,
+                    collected_at=collected_at,
+                    timing=DataTiming.DELAYED,
+                    financial_scope=FinancialScope.NOT_APPLICABLE,
+                    is_estimate=False,
+                    source_url=HttpUrl(
+                        "https://naverapihub.apigw.ntruss.com/search/v1/news"
+                    ),
+                ),
+                payload=NaverNewsPage(
+                    lastBuildDate=collected_at,
+                    total=1,
+                    start=1,
+                    display=1,
+                    items=(item,),
+                ),
+                http_status=200,
+                raw_content=b'{"total":1}',
+                response_hash="a" * 64,
+                content_type="application/json",
+            )
+
+    news_provider = AbbreviatedNameNewsProvider()
+    service = EventService(
+        settings,
+        news_provider=news_provider,  # type: ignore[arg-type]
+    )
+    try:
+        summary = asyncio.run(
+            service.refresh(
+                symbol="000007",
+                as_of_date=date(2026, 7, 29),
+            )
+        )
+    finally:
+        service.close()
+
+    with sessions() as session:
+        article = session.scalar(select(NewsArticle))
+    assert news_provider.queries == ["삼성전자"]
+    assert summary.news_stored == 1
+    assert article is not None
+    assert article.query == "삼성전자"
+    engine.dispose()
 
 
 def test_phase5_rejects_future_analysis_date(

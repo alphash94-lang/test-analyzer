@@ -110,6 +110,30 @@ class DisclosureRepository:
             ).all()
         )
 
+    def disclosures(
+        self,
+        session: Session,
+        stock_id: int,
+        *,
+        as_of_date: date | None = None,
+    ) -> tuple[Disclosure, ...]:
+        criteria = [
+            Disclosure.stock_id == stock_id,
+            Disclosure.data_state == DataState.AVAILABLE.value,
+        ]
+        if as_of_date is not None:
+            criteria.append(Disclosure.receipt_date <= as_of_date)
+        return tuple(
+            session.scalars(
+                select(Disclosure)
+                .where(*criteria)
+                .order_by(
+                    Disclosure.receipt_date.desc(),
+                    Disclosure.receipt_no.desc(),
+                )
+            ).all()
+        )
+
     def link_corrections(
         self,
         session: Session,

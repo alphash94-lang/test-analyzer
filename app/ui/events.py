@@ -287,9 +287,10 @@ def _render_watchlist_event_preview(
         if snapshot is None:
             st.warning("저장된 종목을 찾을 수 없습니다.")
             return
-        disclosures = tuple(
-            item for item in snapshot.events if item.source_kind == "DISCLOSURE"
-        )
+        disclosures = service.disclosures(
+            symbol,
+            as_of_date=now_kst().date(),
+        ) or ()
         news = tuple(
             item for item in snapshot.events if item.source_kind == "NEWS"
         )
@@ -297,14 +298,36 @@ def _render_watchlist_event_preview(
             [f"OpenDART 공시 {len(disclosures)}", f"네이버 뉴스 {len(news)}"]
         )
         with disclosure_tab:
-            _render_events(
-                snapshot.model_copy(update={"events": disclosures}),
-                title="OpenDART 중요공시",
-                empty_message=(
-                    "저장된 중요공시가 없습니다. 위 수집 버튼을 실행하거나 "
-                    "해당 기간에 중요공시가 없었는지 확인하세요."
-                ),
-            )
+            st.subheader("OpenDART 전체 공시")
+            if disclosures:
+                st.dataframe(
+                    [
+                        {
+                            "접수일": item.receipt_date.isoformat(),
+                            "보고서명": item.report_name,
+                            "제출인": item.filer_name or "-",
+                            "중요공시 분류": (
+                                "중요"
+                                if item.disclosure_type == "IMPORTANT_EVENT"
+                                else "일반"
+                            ),
+                            "정정": (
+                                "정정공시" if item.is_correction else "원공시"
+                            ),
+                            "원문 링크": item.source_url or "-",
+                            "수집시각": item.collected_at.strftime(
+                                "%Y-%m-%d %H:%M:%S KST"
+                            ),
+                        }
+                        for item in disclosures
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "저장된 공시가 없습니다. 위 수집 버튼을 실행하세요."
+                )
         with news_tab:
             _render_events(
                 snapshot.model_copy(update={"events": news}),
