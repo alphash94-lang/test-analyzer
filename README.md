@@ -114,6 +114,40 @@ API 키가 없는 상태에서는 종목, 가격, 배당수익률, RSI, 점수, 
 
 수집 후 앱의 **개별 종목 검색** 메뉴에서 종목명 또는 6자리 코드를 검색한다. 관리종목·거래정지 공식 계약이 아직 확인되지 않았으므로, 보통주라도 최종 유니버스 상태는 `REVIEW_REQUIRED`로 유지될 수 있다.
 
+## 전체 데이터 한 번에 갱신
+
+종목 마스터, KRX 일별가격, KOSPI 지수, 종목별 OpenDART·네이버 뉴스·KIS
+참고 데이터, ECOS 거시지표를 순서대로 갱신한다. 기준일을 생략하면 직전
+평일을 사용한다. 종목코드를 생략하면 앱의 **공시·뉴스 > 관심종목**에
+등록한 KOSPI 보통주만 수집한다. 관심종목이 비어 있을 때만
+삼성전자(`005930`)를 기본값으로 사용한다. 관심종목은 최대 50개이며
+20~50개 운영을 권장한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.update_all
+```
+
+기준일과 종목을 직접 지정하려면 다음처럼 실행한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.update_all `
+  --as-of YYYY-MM-DD `
+  --symbol 005930 `
+  --symbol 000660
+```
+
+한 단계가 실패해도 기본적으로 나머지 공급자를 계속 갱신하며, 최종 JSON의
+`steps`에서 단계별 종료코드와 상태를 확인할 수 있다. 첫 실패에서 멈추려면
+`--stop-on-error`를 추가한다.
+
+### Windows 자동 업데이트
+
+Windows 작업 스케줄러의 `KOSPI Analyzer - Daily Update` 작업은 평일
+18:10(KST)에 `scripts/run_scheduled_update.ps1`을 실행한다. 스케줄 실행은
+당일 날짜를 `--as-of`로 전달하며 결과 로그를
+`data/logs/update_all_YYYY-MM-DD.log`에 저장한다. 놓친 실행은 다음 로그인
+또는 시스템 사용 가능 시점에 시작하며, 이미 실행 중이면 중복 실행하지 않는다.
+
 ## Phase 1B KRX 일별가격 갱신
 
 종목 마스터를 먼저 수집한 뒤 거래일별로 실행한다.

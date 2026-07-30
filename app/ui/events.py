@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import Settings
 from app.models.events import Phase5Snapshot
 from app.services.event_service import EventService
+from app.services.event_watchlist_service import EventWatchlistService
 from app.utils.dates import now_kst
 
 _SYMBOL = re.compile(r"^\d{6}$")
@@ -237,16 +238,93 @@ def _render_flows(snapshot: Phase5Snapshot) -> None:
         )
 
 
-def render_events(settings: Settings) -> None:
-    st.markdown(
-        '<div class="status-kicker">Phase 5 · Events and reference data</div>',
-        unsafe_allow_html=True,
-    )
-    st.title("공시·뉴스·애널리스트·수급")
-    st.caption(
-        "공식 공시를 우선하며 뉴스, 애널리스트 추정, 실제 매매를 "
-        "서로 다른 데이터로 표시합니다."
-    )
+def _render_watchlist(settings: Settings) -> None:
+    service = EventWatchlistService(settings)
+    try:
+        eligible = service.eligible_stocks()
+        current = service.list_items()
+        current_symbols = {item.symbol for item in current}
+        available = [
+            (symbol, name)
+            for symbol, name in eligible
+            if symbol not in current_symbols
+        ]
+        labels = {
+            f"{symbol} · {name}": symbol for symbol, name in available
+        }
+
+        st.subheader(f"관심종목 · {len(current)}/50")
+        st.caption(
+            "활성 KOSPI 보통주 중 20~50개 운영을 권장합니다. "
+            "등록 목록은 KIS·네이버 뉴스·공시 수집 범위로 사용됩니다."
+        )
+        selected_labels = st.multiselect(
+            "추가할 종목",
+            options=list(labels),
+            placeholder="종목명 또는 6자리 코드로 검색",
+            key="event_watchlist_add",
+        )
+        if st.button(
+            "관심종목 추가",
+            disabled=not selected_labels,
+            key="event_watchlist_add_button",
+        ):
+            added = service.add_symbols(
+                [labels[label] for label in selected_labels]
+            )
+            st.success(f"관심종목 {added}개를 추가했습니다.")
+            current = service.list_items()
+
+        if current:
+            st.dataframe(
+                [
+                    {
+                        "종목코드": item.symbol,
+                        "종목명": item.name_ko,
+                        "등록일": item.created_at.strftime("%Y-%m-%d"),
+                    }
+                    for item in current
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+            current_labels = {
+                f"{item.symbol} · {item.name_ko}": item.symbol
+                for item in current
+            }
+            remove_labels = st.multiselect(
+                "삭제할 종목",
+                options=list(current_labels),
+                placeholder="목록에서 삭제할 종목 선택",
+                key="event_watchlist_remove",
+            )
+            if st.button(
+                "선택 종목 삭제",
+                disabled=not remove_labels,
+                key="event_watchlist_remove_button",
+            ):
+                removed = service.remove_symbols(
+                    [current_labels[label] for label in remove_labels]
+                )
+                st.success(f"관심종목 {removed}개를 삭제했습니다.")
+        else:
+            st.info(
+                "등록된 관심종목이 없습니다. KOSPI 보통주를 검색해 "
+                "추가하세요."
+            )
+        st.code(
+            r".\.venv\Scripts\python.exe -m scripts.update_all",
+            language="powershell",
+        )
+        st.caption(
+            "위 한 줄을 실행하면 관심종목만 공시·뉴스·KIS 단계에서 "
+            "순서대로 갱신합니다."
+        )
+    finally:
+        service.close()
+
+
+def _render_symbol_lookup(settings: Settings) -> None:
     service: EventService | None = None
     try:
         service = EventService(settings)
@@ -308,9 +386,27 @@ def render_events(settings: Settings) -> None:
             _render_flows(snapshot)
         with status_tab:
             _render_availability(snapshot)
-    except (OSError, SQLAlchemyError, ValueError) as exc:
-        st.error(f"Phase 5 화면 초기화 실패: {type(exc).__name__}")
-        st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")
     finally:
         if service is not None:
             service.close()
+
+
+def render_events(settings: Settings) -> None:
+    st.markdown(
+        '<div class="status-kicker">Phase 5 · Events and reference data</div>',
+        unsafe_allow_html=True,
+    )
+    st.title("공시·뉴스·애널리스트·수급")
+    st.caption(
+        "공식 공시를 우선하며 뉴스, 애널리스트 추정, 실제 매매를 "
+        "서로 다른 데이터로 표시합니다."
+    )
+    try:
+        watchlist_tab, lookup_tab = st.tabs(["관심종목", "종목별 조회"])
+        with watchlist_tab:
+            _render_watchlist(settings)
+        with lookup_tab:
+            _render_symbol_lookup(settings)
+    except (OSError, SQLAlchemyError, ValueError) as exc:
+        st.error(f"Phase 5 화면 초기화 실패: {type(exc).__name__}")
+        st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")

@@ -55,6 +55,14 @@ class RawResponseRepository:
             )
         )
         if existing is not None:
+            existing.received_at = response.metadata.collected_at
+            existing.as_of_at = response.metadata.as_of_at
+            existing.http_status = response.http_status
+            existing.content_type = response.content_type
+            existing.normalized_success = response.state == DataState.AVAILABLE
+            existing.data_state = response.state.value
+            existing.error_code = response.error_code
+            existing.error_message = response.error_message
             return existing
         storage_path = self._write_raw(
             provider=provider,

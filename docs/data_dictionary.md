@@ -308,6 +308,14 @@ OpenDART 배당 표의 원 라벨과 원 값을 보존한다.
 
 ## 이벤트·뉴스·애널리스트·수급
 
+### `event_watchlist_items`
+
+공시·뉴스·KIS 수집 범위를 제한하는 사용자 관심종목 목록이다.
+
+- 핵심 필드: `stock_id`, `category`, `created_at`
+- `stock_id`와 `category` 조합은 유일하며 현재 `INTEREST` 카테고리를 사용한다.
+- 애플리케이션은 활성 KOSPI 보통주만 등록하고 최대 50개로 제한한다.
+
 ### `news_articles`
 
 네이버 API HUB가 제공한 제목과 요약만 저장한다.

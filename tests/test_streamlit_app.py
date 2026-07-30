@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db.models.market import Stock
 from app.db.session import create_db_engine, create_session_factory
 from app.services.market_regime_service import MarketRegimeService
@@ -15,6 +15,30 @@ from app.services.phase2_service import Phase2ScoringService
 from app.ui.stock_search import _format_going_concern
 from app.utils.dates import SEOUL
 from tests.helpers import migrate_database
+
+_API_CREDENTIAL_ENV_NAMES = (
+    "KRX_API_KEY",
+    "DART_API_KEY",
+    "KIS_APP_KEY",
+    "KIS_APP_SECRET",
+    "KIS_ACCOUNT_NO",
+    "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY",
+    "NAVER_CLIENT_ID",
+    "NAVER_CLIENT_SECRET",
+    "BOK_API_KEY",
+    "ECOS_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_streamlit_tests_from_local_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for name in _API_CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
 
 
 def rendered_text(app: AppTest) -> str:
@@ -79,6 +103,34 @@ def test_no_key_status_screen_opens_without_fake_market_data(
         assert forbidden_value not in text
 
 
+def test_krx_preview_menu_opens_with_truthful_empty_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migrate_database(tmp_path / "krx-preview.db", monkeypatch)
+    get_settings.cache_clear()
+
+    app = AppTest.from_file("app/main.py", default_timeout=15).run()
+    app.radio[0].set_value("통합 API 미리보기").run()
+    text = rendered_text(app)
+
+    assert not app.exception
+    assert "통합 API 데이터 미리보기" in text
+    assert "OpenDART 공시 미리보기" in text
+    assert "KIS 투자의견·수급·공매도" in text
+    assert "네이버 종목 뉴스" in text
+    assert "ECOS 금리·환율 차트" in text
+    assert "전체 데이터 최신 수집 시각" in text
+    assert "종목 기본정보" in text
+    assert "일별 가격" in text
+    assert "KOSPI 지수" in text
+    assert "수집 이력" in text
+    assert "조건에 맞는 KRX 종목 기본정보가 없습니다." in text
+    assert "저장된 KRX 일별 가격이 없습니다." in text
+    assert "저장된 KOSPI 지수 데이터가 없습니다." in text
+    assert "저장된 KRX 수집 이력이 없습니다." in text
+
+
 def test_market_dashboard_without_inputs_shows_specific_connection_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,6 +191,8 @@ def test_phase5_menu_without_keys_shows_specific_reasons_and_no_fake_events(
 
     assert not app.exception
     assert "공시·뉴스·애널리스트·수급" in text
+    assert "관심종목 · 0/50" in text
+    assert "등록된 관심종목이 없습니다" in text
     assert "DART_API_KEY" in text
     assert "NCP_APIGW_API_KEY_ID" in text
     assert "KIND" in text

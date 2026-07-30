@@ -112,3 +112,32 @@ def test_latest_failed_attempt_overrides_older_success(
 
     assert statuses["KRX"] == ConnectionState.FAILED
     engine.dispose()
+
+
+def test_ecos_successful_attempt_marks_provider_connected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "ecos-status.db", monkeypatch)
+    settings = make_settings(
+        database_url=database_url,
+        ecos_api_key="configured",
+    )
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    with sessions.begin() as session:
+        session.add(
+            ApiRawResponse(
+                provider="ECOS",
+                function_name="통계조회: 한국은행 기준금리",
+                request_params_hash="e" * 64,
+                received_at=now_kst(),
+                http_status=200,
+                response_hash="f" * 64,
+                normalized_success=True,
+                data_state="AVAILABLE",
+            )
+        )
+
+    assert as_mapping(settings)["ECOS"] == ConnectionState.CONNECTED
+    engine.dispose()

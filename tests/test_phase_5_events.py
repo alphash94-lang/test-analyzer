@@ -12,7 +12,7 @@ from pydantic import HttpUrl
 from sqlalchemy import select
 
 from app.db.models.disclosure import Disclosure
-from app.db.models.event import EventRecord, NewsArticle
+from app.db.models.event import AnalystOpinion, EventRecord, NewsArticle
 from app.db.models.market import Stock
 from app.db.session import create_db_engine, create_session_factory
 from app.models.events import (
@@ -279,6 +279,54 @@ def test_kis_provider_rejects_an_uncollected_continuation_page() -> None:
     assert response.state == DataState.FETCH_FAILED
     assert response.error_code == "PARTIAL_RESPONSE_UNSUPPORTED"
     assert response.payload is None
+
+
+def test_analyst_opinion_upsert_collapses_same_date_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "analyst-opinion.db", monkeypatch)
+    settings = make_settings(database_url=database_url)
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    collected_at = datetime(2026, 7, 29, 18, 0, tzinfo=SEOUL)
+    items = [
+        KisAnalystOpinionItem.model_validate(
+            {
+                "stck_bsop_date": "20260708",
+                "invt_opnn": "BUY",
+                "hts_goal_prc": "380000",
+            }
+        ),
+        KisAnalystOpinionItem.model_validate(
+            {
+                "stck_bsop_date": "20260708",
+                "invt_opnn": "BUY",
+                "hts_goal_prc": "390000",
+            }
+        ),
+    ]
+
+    with sessions.begin() as session:
+        stock = _stock(collected_at)
+        session.add(stock)
+        session.flush()
+        stored = EventRepository.upsert_analyst_opinions(
+            session,
+            stock=stock,
+            items=items,
+            raw_response_id=None,
+            collected_at=collected_at,
+            source_url="https://openapi.koreainvestment.com/opinions",
+        )
+
+    with sessions() as session:
+        rows = session.scalars(select(AnalystOpinion)).all()
+
+    assert stored == 1
+    assert len(rows) == 1
+    assert rows[0].target_price == Decimal(390000)
+    engine.dispose()
 
 
 def test_kis_program_trading_uses_official_market_aggregate_field() -> None:

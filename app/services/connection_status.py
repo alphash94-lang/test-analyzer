@@ -46,6 +46,7 @@ REQUIRED_TABLES = frozenset(
         "portfolio_allocations",
         "news_articles",
         "event_records",
+        "event_watchlist_items",
         "analyst_opinions",
         "earnings_estimates",
         "investor_flows",
@@ -173,13 +174,24 @@ def _naver_status(
     )
 
 
-def _ecos_status(settings: Settings) -> ConnectionStatusItem:
-    if _has_value(settings.bok_api_key) or _has_value(settings.ecos_api_key):
-        return ConnectionStatusItem(
-            provider="ECOS",
-            state=ConnectionState.NOT_VERIFIED,
-            detail="인증정보가 감지됐지만 실제 통계조회는 수행하지 않았습니다.",
-            checked_at=now_kst(),
+def _ecos_status(
+    settings: Settings,
+    *,
+    latest_attempt: ProviderAttempt | None = None,
+) -> ConnectionStatusItem:
+    if _has_value(settings.ecos_api_key):
+        return _credential_status(
+            "ECOS",
+            [("ECOS_API_KEY", settings.ecos_api_key)],
+            latest_attempt=latest_attempt,
+            freshness_warning_hours=settings.data_freshness_warning_hours,
+        )
+    if _has_value(settings.bok_api_key):
+        return _credential_status(
+            "ECOS",
+            [("BOK_API_KEY", settings.bok_api_key)],
+            latest_attempt=latest_attempt,
+            freshness_warning_hours=settings.data_freshness_warning_hours,
         )
     return ConnectionStatusItem(
         provider="ECOS",
@@ -260,7 +272,10 @@ def get_connection_statuses(settings: Settings) -> list[ConnectionStatusItem]:
             settings,
             latest_attempt=latest_attempts.get("Naver API HUB"),
         ),
-        _ecos_status(settings),
+        _ecos_status(
+            settings,
+            latest_attempt=latest_attempts.get("ECOS"),
+        ),
         _database_status(settings),
     ]
 
@@ -286,6 +301,7 @@ def _latest_raw_provider_attempts(
                             "OpenDART",
                             "Naver API HUB",
                             "한국투자증권",
+                            "ECOS",
                         )
                     )
                 )

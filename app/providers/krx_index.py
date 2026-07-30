@@ -16,6 +16,20 @@ from app.utils.http import AsyncRateLimiter, request_with_retry
 
 KRX_KOSPI_INDEX_ENDPOINT = "https://data-dbg.krx.co.kr/svc/apis/idx/kospi_dd_trd"
 KRX_KOSPI_INDEX_FUNCTION = "KOSPI 시리즈 일별시세정보"
+KRX_INDEX_CORE_VALUE_FIELDS = (
+    "CLSPRC_IDX",
+    "CMPPREVDD_IDX",
+    "FLUC_RT",
+    "OPNPRC_IDX",
+    "HGPRC_IDX",
+    "LWPRC_IDX",
+)
+
+
+def _has_fully_blank_core_values(row: object) -> bool:
+    return isinstance(row, dict) and all(
+        not str(row.get(field, "")).strip() for field in KRX_INDEX_CORE_VALUE_FIELDS
+    )
 
 
 class KrxIndexDailyProvider(BaseProvider[list[KrxIndexDailyItem]]):
@@ -127,7 +141,12 @@ class KrxIndexDailyProvider(BaseProvider[list[KrxIndexDailyItem]]):
             rows = body.get("OutBlock_1") if isinstance(body, dict) else None
             if not isinstance(rows, list):
                 raise TypeError("OutBlock_1 list is missing")
-            records = TypeAdapter(list[KrxIndexDailyItem]).validate_python(rows)
+            usable_rows = [
+                row for row in rows if not _has_fully_blank_core_values(row)
+            ]
+            records = TypeAdapter(list[KrxIndexDailyItem]).validate_python(
+                usable_rows
+            )
             if any(record.trade_date != requested_date for record in records):
                 raise ValueError("KRX BAS_DD differs from requested basDd")
         except (TypeError, ValueError, ValidationError) as exc:

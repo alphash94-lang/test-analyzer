@@ -15,7 +15,7 @@ class KrxDailyPriceItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
     trade_date_raw: str = Field(alias="BAS_DD")
-    issue_code: str = Field(alias="ISU_CD")
+    symbol: str = Field(alias="ISU_CD")
     name: str = Field(alias="ISU_NM")
     market_name: str = Field(alias="MKT_NM")
     department_name: str = Field(alias="SECT_TP_NM")
@@ -32,7 +32,7 @@ class KrxDailyPriceItem(BaseModel):
 
     @field_validator(
         "trade_date_raw",
-        "issue_code",
+        "symbol",
         "name",
         "market_name",
         "department_name",
@@ -56,11 +56,26 @@ class KrxDailyPriceItem(BaseModel):
             raise ValueError("KRX BAS_DD is not a valid calendar date") from exc
         return normalized
 
-    @field_validator("issue_code", "name", "market_name")
+    @field_validator("symbol", "name", "market_name")
     @classmethod
     def require_critical_text(cls, value: str) -> str:
         if not value:
             raise ValueError("required KRX official field must not be empty")
+        return value
+
+    @field_validator("symbol")
+    @classmethod
+    def require_six_character_symbol(cls, value: str) -> str:
+        if (
+            len(value) != 6
+            or not value.isascii()
+            or not value.isalnum()
+            or value != value.upper()
+        ):
+            raise ValueError(
+                "KRX price symbol must contain exactly six uppercase "
+                "alphanumeric characters"
+            )
         return value
 
     @field_validator(
@@ -105,6 +120,13 @@ class KrxDailyPriceItem(BaseModel):
         )
         if any(value < 0 for value in non_negative):
             raise ValueError("KRX prices, quantities, and amounts must be non-negative")
+        if (
+            self.volume == 0
+            and self.open_price == 0
+            and self.high_price == 0
+            and self.low_price == 0
+        ):
+            return self
         if self.high_price < max(
             self.open_price,
             self.low_price,

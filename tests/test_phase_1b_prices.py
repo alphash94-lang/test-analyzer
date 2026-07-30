@@ -28,7 +28,7 @@ from tests.test_stock_classification import minimum_item
 def daily_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "BAS_DD": "20260729",
-        "ISU_CD": "KR7000001001",
+        "ISU_CD": "000001",
         "ISU_NM": "가격검증",
         "MKT_NM": "KOSPI",
         "SECT_TP_NM": "",
@@ -77,6 +77,22 @@ def test_daily_price_contract_distinguishes_zero_from_missing() -> None:
     assert zero.close_price == Decimal(0)
     with pytest.raises(ValueError, match="must not be null"):
         KrxDailyPriceItem.model_validate(daily_row(TDD_CLSPRC=None))
+
+
+def test_daily_price_contract_accepts_official_no_trade_ohl_pattern() -> None:
+    item = KrxDailyPriceItem.model_validate(
+        daily_row(
+            TDD_CLSPRC="10,000",
+            TDD_OPNPRC="0",
+            TDD_HGPRC="0",
+            TDD_LWPRC="0",
+            ACC_TRDVOL="0",
+            ACC_TRDVAL="0",
+        )
+    )
+
+    assert item.close_price == Decimal(10000)
+    assert item.volume == Decimal(0)
 
 
 def test_provider_rejects_response_for_different_date() -> None:
@@ -155,7 +171,7 @@ def test_repository_upserts_idempotently_and_reports_unmatched(
     )
     matched = KrxDailyPriceItem.model_validate(daily_row())
     unmatched = KrxDailyPriceItem.model_validate(
-        daily_row(ISU_CD="KR7999999001", ISU_NM="미매핑")
+        daily_row(ISU_CD="999999", ISU_NM="미매핑")
     )
     with sessions.begin() as session:
         stock_repository.upsert_krx_records(
@@ -275,7 +291,7 @@ def test_latest_price_preserves_missing_market_values(
     engine.dispose()
 
 
-def test_duplicate_master_issue_code_does_not_choose_an_arbitrary_stock(
+def test_price_mapping_uses_short_symbol_when_master_issue_code_is_duplicated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -312,6 +328,6 @@ def test_duplicate_master_issue_code_does_not_choose_an_arbitrary_stock(
         )
         price_count = session.query(PriceDaily).count()
 
-    assert (stored, unmatched) == (0, 1)
-    assert price_count == 0
+    assert (stored, unmatched) == (1, 0)
+    assert price_count == 1
     engine.dispose()

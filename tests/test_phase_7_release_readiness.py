@@ -347,6 +347,78 @@ def test_raw_response_repository_deduplicates_same_request_and_response(
     engine.dispose()
 
 
+def test_raw_response_retry_updates_normalization_state_without_duplication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "raw-retry.db", monkeypatch)
+    settings = make_settings(
+        database_url=database_url,
+        raw_data_dir=tmp_path / "raw",
+    )
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    repository = RawResponseRepository(settings)
+    collected_at = now_kst()
+    metadata = DataMetadata(
+        provider="TEST",
+        function_name="READ_ONLY",
+        state=DataState.FETCH_FAILED,
+        collected_at=collected_at,
+    )
+    failed = ApiResponse[dict[str, bool]](
+        state=DataState.FETCH_FAILED,
+        metadata=metadata,
+        http_status=200,
+        raw_content=b'{"ok":true}',
+        response_hash="d" * 64,
+        content_type="application/json",
+        error_code="SCHEMA_VALIDATION_FAILED",
+        error_message="old model rejected response",
+    )
+    available = ApiResponse[dict[str, bool]](
+        state=DataState.AVAILABLE,
+        metadata=metadata.model_copy(
+            update={
+                "state": DataState.AVAILABLE,
+                "collected_at": collected_at + timedelta(seconds=1),
+            }
+        ),
+        payload={"ok": True},
+        http_status=200,
+        raw_content=b'{"ok":true}',
+        response_hash="d" * 64,
+        content_type="application/json",
+    )
+
+    with sessions.begin() as session:
+        repository.save(
+            session,
+            provider="TEST",
+            function_name="READ_ONLY",
+            endpoint="https://provider.invalid/read-only",
+            request_parameters={"date": "2026-07-30"},
+            response=failed,
+        )
+        repository.save(
+            session,
+            provider="TEST",
+            function_name="READ_ONLY",
+            endpoint="https://provider.invalid/read-only",
+            request_parameters={"date": "2026-07-30"},
+            response=available,
+        )
+
+    with sessions() as session:
+        rows = session.scalars(select(ApiRawResponse)).all()
+        assert len(rows) == 1
+        assert rows[0].data_state == DataState.AVAILABLE.value
+        assert rows[0].normalized_success is True
+        assert rows[0].error_code is None
+        assert rows[0].error_message is None
+    engine.dispose()
+
+
 def test_final_checklist_has_all_twenty_criteria_and_allowed_states() -> None:
     checklist = (
         PROJECT_ROOT / "docs/FINAL_COMPLETION_CHECKLIST.md"

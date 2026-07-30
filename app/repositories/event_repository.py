@@ -229,30 +229,36 @@ class EventRepository:
         collected_at: datetime,
         source_url: str,
     ) -> int:
-        stored = 0
-        for item in items:
-            row = session.scalar(
-                select(AnalystOpinion).where(
-                    AnalystOpinion.stock_id == stock.id,
-                    AnalystOpinion.source_provider == "한국투자증권",
-                    AnalystOpinion.broker == "한국투자증권",
-                    AnalystOpinion.published_date == item.published_date,
-                )
+        provider = "한국투자증권"
+        published_dates = {item.published_date for item in items}
+        existing_rows = session.scalars(
+            select(AnalystOpinion).where(
+                AnalystOpinion.stock_id == stock.id,
+                AnalystOpinion.source_provider == provider,
+                AnalystOpinion.broker == provider,
+                AnalystOpinion.published_date.in_(published_dates),
             )
+        ).all()
+        rows_by_date = {row.published_date: row for row in existing_rows}
+        stored = 0
+        touched_dates: set[date] = set()
+        for item in items:
+            row = rows_by_date.get(item.published_date)
             if row is None:
                 row = AnalystOpinion(
                     stock_id=stock.id,
-                    broker="한국투자증권",
+                    broker=provider,
                     published_date=item.published_date,
                 )
                 session.add(row)
+                rows_by_date[item.published_date] = row
             row.raw_response_id = raw_response_id
             row.opinion = item.opinion
             row.target_price = item.target_price
             row.currency = item.currency
             row.source_url = source_url
             row.is_estimate = True
-            row.source_provider = "한국투자증권"
+            row.source_provider = provider
             row.source_function = "국내주식 종목투자의견"
             row.data_state = DataState.AVAILABLE.value
             row.as_of_at = datetime.combine(
@@ -262,7 +268,9 @@ class EventRepository:
             )
             row.collected_at = collected_at
             row.data_timing = DataTiming.DELAYED.value
-            stored += 1
+            if item.published_date not in touched_dates:
+                stored += 1
+                touched_dates.add(item.published_date)
         session.flush()
         return stored
 

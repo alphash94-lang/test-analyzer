@@ -54,6 +54,28 @@ class NewsArticle(Base, CreatedAtMixin, SourceMetadataMixin):
     used_text_scope: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class EventWatchlistItem(Base, CreatedAtMixin):
+    __tablename__ = "event_watchlist_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "stock_id",
+            "category",
+            name="uq_event_watchlist_stock_category",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stock_id: Mapped[int] = mapped_column(
+        ForeignKey("stocks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    category: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="INTEREST",
+    )
+
+
 class EventRecord(Base, CreatedAtMixin):
     __tablename__ = "event_records"
     __table_args__ = (
