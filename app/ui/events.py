@@ -60,12 +60,20 @@ def _render_availability(snapshot: Phase5Snapshot) -> None:
     )
 
 
-def _render_events(snapshot: Phase5Snapshot) -> None:
-    st.subheader("공시·뉴스 이벤트")
+def _render_events(
+    snapshot: Phase5Snapshot,
+    *,
+    title: str = "공시·뉴스 이벤트",
+    empty_message: str | None = None,
+) -> None:
+    st.subheader(title)
     if not snapshot.events:
         st.info(
-            "저장된 공식 이벤트가 없습니다. API 키와 종목 매핑을 확인한 뒤 "
-            "수집 명령 또는 아래 버튼을 실행하세요."
+            empty_message
+            or (
+                "저장된 공식 이벤트가 없습니다. API 키와 종목 매핑을 "
+                "확인한 뒤 수집 명령 또는 아래 버튼을 실행하세요."
+            )
         )
         return
     st.dataframe(
@@ -238,6 +246,77 @@ def _render_flows(snapshot: Phase5Snapshot) -> None:
         )
 
 
+def _render_watchlist_event_preview(
+    settings: Settings,
+    *,
+    symbol: str,
+    name_ko: str,
+) -> None:
+    st.divider()
+    st.subheader(f"{name_ko} ({symbol}) 관련 공시·뉴스")
+    service = EventService(settings)
+    try:
+        collect_clicked = st.button(
+            "선택 종목 데이터 지금 수집",
+            key=f"watchlist_collect_{symbol}",
+            help="OpenDART 공시, 네이버 뉴스와 KIS 참고 데이터를 갱신합니다.",
+        )
+        if collect_clicked:
+            with st.spinner(f"{name_ko} 공식 데이터를 수집하고 있습니다."):
+                summary = asyncio.run(
+                    service.refresh(
+                        symbol=symbol,
+                        as_of_date=now_kst().date(),
+                    )
+                )
+            if summary.state.value == "AVAILABLE":
+                st.success(
+                    "수집 완료 · "
+                    f"중요공시 {summary.disclosures_stored}건 · "
+                    f"뉴스 {summary.news_stored}건 · "
+                    f"중복 제외 {summary.news_deduplicated}건"
+                )
+            else:
+                st.warning(
+                    f"수집 상태: {_STATE_LABELS[summary.state.value]}"
+                )
+            for error in summary.errors:
+                st.error(error)
+
+        snapshot = service.snapshot(symbol, as_of_date=now_kst().date())
+        if snapshot is None:
+            st.warning("저장된 종목을 찾을 수 없습니다.")
+            return
+        disclosures = tuple(
+            item for item in snapshot.events if item.source_kind == "DISCLOSURE"
+        )
+        news = tuple(
+            item for item in snapshot.events if item.source_kind == "NEWS"
+        )
+        disclosure_tab, news_tab = st.tabs(
+            [f"OpenDART 공시 {len(disclosures)}", f"네이버 뉴스 {len(news)}"]
+        )
+        with disclosure_tab:
+            _render_events(
+                snapshot.model_copy(update={"events": disclosures}),
+                title="OpenDART 중요공시",
+                empty_message=(
+                    "저장된 중요공시가 없습니다. 위 수집 버튼을 실행하거나 "
+                    "해당 기간에 중요공시가 없었는지 확인하세요."
+                ),
+            )
+        with news_tab:
+            _render_events(
+                snapshot.model_copy(update={"events": news}),
+                title="네이버 종목 뉴스",
+                empty_message=(
+                    "저장된 종목 뉴스가 없습니다. 위 수집 버튼을 실행하세요."
+                ),
+            )
+    finally:
+        service.close()
+
+
 def _render_watchlist(settings: Settings) -> None:
     service = EventWatchlistService(settings)
     try:
@@ -276,7 +355,7 @@ def _render_watchlist(settings: Settings) -> None:
             current = service.list_items()
 
         if current:
-            st.dataframe(
+            table_state = st.dataframe(
                 [
                     {
                         "종목코드": item.symbol,
@@ -287,7 +366,11 @@ def _render_watchlist(settings: Settings) -> None:
                 ],
                 width="stretch",
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="event_watchlist_table",
             )
+            st.caption("관심종목 행을 클릭하면 아래에서 공시와 뉴스를 확인합니다.")
             current_labels = {
                 f"{item.symbol} · {item.name_ko}": item.symbol
                 for item in current
@@ -307,6 +390,18 @@ def _render_watchlist(settings: Settings) -> None:
                     [current_labels[label] for label in remove_labels]
                 )
                 st.success(f"관심종목 {removed}개를 삭제했습니다.")
+
+            selection_state = table_state.get("selection", {})
+            selected_rows = selection_state.get("rows", [])
+            if selected_rows:
+                selected_index = selected_rows[0]
+                if 0 <= selected_index < len(current):
+                    selected_item = current[selected_index]
+                    _render_watchlist_event_preview(
+                        settings,
+                        symbol=selected_item.symbol,
+                        name_ko=selected_item.name_ko,
+                    )
         else:
             st.info(
                 "등록된 관심종목이 없습니다. KOSPI 보통주를 검색해 "
