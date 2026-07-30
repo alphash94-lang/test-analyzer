@@ -49,7 +49,7 @@ class EventWatchlistRepository:
             )
             .join(Stock, Stock.id == EventWatchlistItem.stock_id)
             .where(EventWatchlistItem.category == WATCHLIST_CATEGORY)
-            .order_by(EventWatchlistItem.created_at, Stock.symbol)
+            .order_by(Stock.symbol)
         ).all()
         return tuple(
             WatchlistStock(
