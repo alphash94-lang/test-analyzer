@@ -1,0 +1,1 @@
+"""KOSPI analyzer application package."""
