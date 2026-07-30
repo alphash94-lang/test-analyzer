@@ -59,7 +59,11 @@ def classify_krx_stock(item: KrxStockMasterItem) -> ClassifiedStock:
 
     product_type = _product_type(item.security_group_name)
     share_class = _share_class(item.certificate_type_name)
-    is_kospi = True if item.market_type_name == "유가증권시장" else None
+    is_kospi = (
+        True
+        if item.market_type_name in {"유가증권시장", "KOSPI"}
+        else None
+    )
 
     if is_kospi is not True:
         universe_status = UniverseStatus.REVIEW_REQUIRED

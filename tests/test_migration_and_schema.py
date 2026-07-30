@@ -45,7 +45,7 @@ def test_alembic_upgrade_creates_required_schema(
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "s5h8i9j0k1l2"
+            == "t6i9j0k1l2m3"
         )
         stock_columns = {
             column["name"] for column in inspect(engine).get_columns("stocks")

@@ -146,10 +146,16 @@ def test_unverified_compound_product_value_is_not_inferred() -> None:
 
 def test_kospi_membership_uses_only_exact_official_market_value() -> None:
     kospi = classify_krx_stock(minimum_item())
+    kospi_code_payload = minimum_item().model_dump(by_alias=True)
+    kospi_code_payload["MKT_TP_NM"] = "KOSPI"
+    kospi_code = classify_krx_stock(
+        KrxStockMasterItem.model_validate(kospi_code_payload)
+    )
     payload = minimum_item().model_dump(by_alias=True)
     payload["MKT_TP_NM"] = "시장값 미확인"
     unknown = classify_krx_stock(KrxStockMasterItem.model_validate(payload))
 
     assert kospi.is_kospi is True
+    assert kospi_code.is_kospi is True
     assert unknown.is_kospi is None
     assert unknown.universe_status == UniverseStatus.REVIEW_REQUIRED
