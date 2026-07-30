@@ -9,6 +9,8 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.db.models.disclosure import Disclosure
+from app.db.models.event import EventWatchlistItem
 from app.db.models.market import Stock
 from app.db.models.quality import ApiRawResponse
 from app.db.session import create_db_engine, create_session_factory
@@ -99,7 +101,28 @@ class EventService:
                 )
             stock_id = stock.id
             corp_code = stock.dart_corp_code
-            stock_name = stock.name_ko
+            custom_news_query = session.scalar(
+                select(EventWatchlistItem.news_query).where(
+                    EventWatchlistItem.stock_id == stock.id,
+                    EventWatchlistItem.category == "INTEREST",
+                )
+            )
+            news_query = (
+                custom_news_query
+                or stock.abbreviated_name
+                or stock.name_ko
+            )
+            news_names = tuple(
+                dict.fromkeys(
+                    name
+                    for name in (
+                        custom_news_query,
+                        stock.abbreviated_name,
+                        stock.name_ko,
+                    )
+                    if name
+                )
+            )
 
         errors: list[str] = []
         provider_states: list[DataState] = []
@@ -142,7 +165,7 @@ class EventService:
             errors.append("OpenDART 고유번호가 매핑되지 않았습니다.")
 
         news_response = await self._news.fetch_news(
-            query=stock_name,
+            query=news_query,
             display=self._settings.phase5_news_display,
             sort="date",
         )
@@ -153,7 +176,7 @@ class EventService:
             function_name=NAVER_NEWS_FUNCTION,
             endpoint=NAVER_NEWS_ENDPOINT,
             request_parameters={
-                "query": stock_name,
+                "query": news_query,
                 "display": str(self._settings.phase5_news_display),
                 "start": "1",
                 "sort": "date",
@@ -169,7 +192,10 @@ class EventService:
             name_matched_items = tuple(
                 item
                 for item in news_response.payload.items
-                if stock_name in f"{item.title} {item.summary}"
+                if any(
+                    name in f"{item.title} {item.summary}"
+                    for name in news_names
+                )
             )
             relevant_items = tuple(
                 item
@@ -193,7 +219,7 @@ class EventService:
                     news_stored, news_deduplicated = self._events.upsert_news(
                         session,
                         stock=stock,
-                        query=stock_name,
+                        query=news_query,
                         items=relevant_items,
                         raw_response_id=news_raw_id,
                         collected_at=news_response.metadata.collected_at,
@@ -345,6 +371,26 @@ class EventService:
                     as_of_date=basis_date,
                 ),
                 availability=self.availability(),
+            )
+
+    def disclosures(
+        self,
+        symbol: str,
+        *,
+        as_of_date: date | None = None,
+    ) -> tuple[Disclosure, ...] | None:
+        today = now_kst().date()
+        basis_date = as_of_date or today
+        if basis_date > today:
+            raise ValueError("as_of_date must not be in the future")
+        with self._sessions() as session:
+            stock = session.scalar(self._stock_query(symbol))
+            if stock is None:
+                return None
+            return self._disclosures.disclosures(
+                session,
+                stock.id,
+                as_of_date=basis_date,
             )
 
     def availability(self) -> tuple[ReferenceAvailability, ...]:
@@ -553,7 +599,7 @@ class EventService:
                 errors.append("OpenDART 공시검색 페이지 수가 비정상입니다.")
                 state = DataState.FETCH_FAILED
                 break
-            selected = tuple(
+            important_items = tuple(
                 item
                 for item in page.items
                 if classify_disclosure(
@@ -561,6 +607,9 @@ class EventService:
                     rule_version=self._settings.phase5_event_rule_version,
                 )
                 is not None
+            )
+            general_items = tuple(
+                item for item in page.items if item not in important_items
             )
             with self._sessions.begin() as session:
                 stock = session.get(Stock, stock_id)
@@ -577,9 +626,17 @@ class EventService:
                 stored += self._disclosures.upsert(
                     session,
                     stock=stock,
-                    items=selected,
+                    items=important_items,
                     raw_response_id=raw_id,
                     disclosure_type="IMPORTANT_EVENT",
+                    collected_at=response.metadata.collected_at,
+                )
+                self._disclosures.upsert(
+                    session,
+                    stock=stock,
+                    items=general_items,
+                    raw_response_id=raw_id,
+                    disclosure_type="GENERAL",
                     collected_at=response.metadata.collected_at,
                 )
                 self._set_normalization_success(

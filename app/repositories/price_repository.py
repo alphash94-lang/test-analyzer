@@ -28,50 +28,32 @@ class PriceRepository:
         as_of_at: datetime,
         collected_at: datetime,
     ) -> tuple[int, int]:
-        stocks_by_issue_code: dict[str, list[Stock]] = {}
+        stocks_by_symbol: dict[str, Stock] = {}
         for stock in session.scalars(
-            select(Stock).where(
-                Stock.is_active.is_(True),
-                Stock.issue_code.is_not(None),
-            )
+            select(Stock).where(Stock.is_active.is_(True))
         ).all():
-            if stock.issue_code is not None:
-                stocks_by_issue_code.setdefault(stock.issue_code, []).append(stock)
+            stocks_by_symbol[stock.symbol] = stock
         stored = 0
         unmatched = 0
         for item in records:
-            candidates = stocks_by_issue_code.get(item.issue_code, [])
-            if len(candidates) != 1:
+            stock = stocks_by_symbol.get(item.symbol)
+            if stock is None:
                 unmatched += 1
-                is_conflict = len(candidates) > 1
                 self._quality.add(
                     session,
                     entity_type="price_daily",
-                    entity_id=item.issue_code,
+                    entity_id=item.symbol,
                     provider="KRX",
-                    issue_code=(
-                        "AMBIGUOUS_ISSUE_CODE"
-                        if is_conflict
-                        else "UNMATCHED_ISSUE_CODE"
-                    ),
-                    severity="ERROR" if is_conflict else "WARNING",
-                    data_state=(
-                        DataState.CONFLICT if is_conflict else DataState.MISSING
-                    ),
-                    message=(
-                        "KRX 일별가격의 종목 식별자가 여러 종목과 충돌합니다."
-                        if is_conflict
-                        else "KRX 일별가격의 종목 식별자를 종목 마스터에서 찾지 못했습니다."
-                    ),
+                    issue_code="UNMATCHED_SYMBOL",
+                    severity="WARNING",
+                    data_state=DataState.MISSING,
+                    message="KRX 일별가격의 단축코드를 종목 마스터에서 찾지 못했습니다.",
                     context={
                         "trade_date": item.trade_date.isoformat(),
-                        "candidate_symbols": [
-                            candidate.symbol for candidate in candidates
-                        ],
+                        "symbol": item.symbol,
                     },
                 )
                 continue
-            stock = candidates[0]
             row = session.scalar(
                 select(PriceDaily).where(
                     PriceDaily.stock_id == stock.id,

@@ -7,6 +7,7 @@ from app.logging_config import configure_logging
 from app.ui.backtest import render_backtest
 from app.ui.data_status import render_data_status
 from app.ui.events import render_events
+from app.ui.krx_preview import render_krx_preview
 from app.ui.market_dashboard import render_market_dashboard
 from app.ui.placeholders import render_settings_page, render_unavailable_page
 from app.ui.portfolio import render_portfolio
@@ -15,6 +16,7 @@ from app.ui.stock_search import render_stock_search
 from app.ui.styles import apply_styles
 
 MENU_PHASES: dict[str, str] = {}
+API_PREVIEW_MENU = "통합 API 미리보기"
 
 
 def main() -> None:
@@ -41,6 +43,7 @@ def main() -> None:
                 "포트폴리오",
                 "공시·뉴스",
                 "백테스트",
+                API_PREVIEW_MENU,
                 *MENU_PHASES.keys(),
                 "설정",
             ],
@@ -63,6 +66,8 @@ def main() -> None:
         render_events(settings)
     elif selected == "백테스트":
         render_backtest(settings)
+    elif selected == API_PREVIEW_MENU:
+        render_krx_preview(settings)
     elif selected == "설정":
         render_settings_page()
     else:

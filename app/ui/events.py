@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import Settings
 from app.models.events import Phase5Snapshot
 from app.services.event_service import EventService
+from app.services.event_watchlist_service import EventWatchlistService
 from app.utils.dates import now_kst
 
 _SYMBOL = re.compile(r"^\d{6}$")
@@ -59,12 +60,20 @@ def _render_availability(snapshot: Phase5Snapshot) -> None:
     )
 
 
-def _render_events(snapshot: Phase5Snapshot) -> None:
-    st.subheader("공시·뉴스 이벤트")
+def _render_events(
+    snapshot: Phase5Snapshot,
+    *,
+    title: str = "공시·뉴스 이벤트",
+    empty_message: str | None = None,
+) -> None:
+    st.subheader(title)
     if not snapshot.events:
         st.info(
-            "저장된 공식 이벤트가 없습니다. API 키와 종목 매핑을 확인한 뒤 "
-            "수집 명령 또는 아래 버튼을 실행하세요."
+            empty_message
+            or (
+                "저장된 공식 이벤트가 없습니다. API 키와 종목 매핑을 "
+                "확인한 뒤 수집 명령 또는 아래 버튼을 실행하세요."
+            )
         )
         return
     st.dataframe(
@@ -237,16 +246,253 @@ def _render_flows(snapshot: Phase5Snapshot) -> None:
         )
 
 
-def render_events(settings: Settings) -> None:
-    st.markdown(
-        '<div class="status-kicker">Phase 5 · Events and reference data</div>',
-        unsafe_allow_html=True,
-    )
-    st.title("공시·뉴스·애널리스트·수급")
-    st.caption(
-        "공식 공시를 우선하며 뉴스, 애널리스트 추정, 실제 매매를 "
-        "서로 다른 데이터로 표시합니다."
-    )
+def _render_watchlist_event_preview(
+    settings: Settings,
+    *,
+    symbol: str,
+    name_ko: str,
+) -> None:
+    st.divider()
+    st.subheader(f"{name_ko} ({symbol}) 관련 공시·뉴스")
+    service = EventService(settings)
+    try:
+        collect_clicked = st.button(
+            "선택 종목 데이터 지금 수집",
+            key=f"watchlist_collect_{symbol}",
+            help="OpenDART 공시, 네이버 뉴스와 KIS 참고 데이터를 갱신합니다.",
+        )
+        if collect_clicked:
+            with st.spinner(f"{name_ko} 공식 데이터를 수집하고 있습니다."):
+                summary = asyncio.run(
+                    service.refresh(
+                        symbol=symbol,
+                        as_of_date=now_kst().date(),
+                    )
+                )
+            if summary.state.value == "AVAILABLE":
+                st.success(
+                    "수집 완료 · "
+                    f"중요공시 {summary.disclosures_stored}건 · "
+                    f"뉴스 {summary.news_stored}건 · "
+                    f"중복 제외 {summary.news_deduplicated}건"
+                )
+            else:
+                st.warning(
+                    f"수집 상태: {_STATE_LABELS[summary.state.value]}"
+                )
+            for error in summary.errors:
+                st.error(error)
+
+        snapshot = service.snapshot(symbol, as_of_date=now_kst().date())
+        if snapshot is None:
+            st.warning("저장된 종목을 찾을 수 없습니다.")
+            return
+        disclosures = service.disclosures(
+            symbol,
+            as_of_date=now_kst().date(),
+        ) or ()
+        news = tuple(
+            item for item in snapshot.events if item.source_kind == "NEWS"
+        )
+        disclosure_tab, news_tab = st.tabs(
+            [f"OpenDART 공시 {len(disclosures)}", f"네이버 뉴스 {len(news)}"]
+        )
+        with disclosure_tab:
+            st.subheader("OpenDART 전체 공시")
+            if disclosures:
+                st.dataframe(
+                    [
+                        {
+                            "접수일": item.receipt_date.isoformat(),
+                            "보고서명": item.report_name,
+                            "제출인": item.filer_name or "-",
+                            "중요공시 분류": (
+                                "중요"
+                                if item.disclosure_type == "IMPORTANT_EVENT"
+                                else "일반"
+                            ),
+                            "정정": (
+                                "정정공시" if item.is_correction else "원공시"
+                            ),
+                            "원문 링크": item.source_url or "-",
+                            "수집시각": item.collected_at.strftime(
+                                "%Y-%m-%d %H:%M:%S KST"
+                            ),
+                        }
+                        for item in disclosures
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info(
+                    "저장된 공시가 없습니다. 위 수집 버튼을 실행하세요."
+                )
+        with news_tab:
+            _render_events(
+                snapshot.model_copy(update={"events": news}),
+                title="네이버 종목 뉴스",
+                empty_message=(
+                    "저장된 종목 뉴스가 없습니다. 위 수집 버튼을 실행하세요."
+                ),
+            )
+    finally:
+        service.close()
+
+
+def _render_watchlist(settings: Settings) -> None:
+    service = EventWatchlistService(settings)
+    try:
+        eligible = service.eligible_stocks()
+        current = service.list_items()
+        current_symbols = {item.symbol for item in current}
+        available = [
+            (symbol, name)
+            for symbol, name in eligible
+            if symbol not in current_symbols
+        ]
+        labels = {
+            f"{symbol} · {name}": symbol for symbol, name in available
+        }
+
+        st.subheader(f"관심종목 · {len(current)}/50")
+        st.caption(
+            "활성 KOSPI 보통주 중 20~50개 운영을 권장합니다. "
+            "등록 목록은 KIS·네이버 뉴스·공시 수집 범위로 사용됩니다."
+        )
+        selected_labels = st.multiselect(
+            "추가할 종목",
+            options=list(labels),
+            placeholder="종목명 또는 6자리 코드로 검색",
+            key="event_watchlist_add",
+        )
+        if st.button(
+            "관심종목 추가",
+            disabled=not selected_labels,
+            key="event_watchlist_add_button",
+        ):
+            added = service.add_symbols(
+                [labels[label] for label in selected_labels]
+            )
+            st.success(f"관심종목 {added}개를 추가했습니다.")
+            current = service.list_items()
+
+        if current:
+            table_state = st.dataframe(
+                [
+                    {
+                        "종목코드": item.symbol,
+                        "종목명": item.name_ko,
+                        "뉴스 검색어": (
+                            item.news_query
+                            or item.abbreviated_name
+                            or item.name_ko
+                        ),
+                        "등록일": item.created_at.strftime("%Y-%m-%d"),
+                    }
+                    for item in current
+                ],
+                width="stretch",
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="event_watchlist_table",
+            )
+            st.caption("관심종목 행을 클릭하면 아래에서 공시와 뉴스를 확인합니다.")
+            current_labels = {
+                f"{item.symbol} · {item.name_ko}": item.symbol
+                for item in current
+            }
+            remove_labels = st.multiselect(
+                "삭제할 종목",
+                options=list(current_labels),
+                placeholder="목록에서 삭제할 종목 선택",
+                key="event_watchlist_remove",
+            )
+            if st.button(
+                "선택 종목 삭제",
+                disabled=not remove_labels,
+                key="event_watchlist_remove_button",
+            ):
+                removed = service.remove_symbols(
+                    [current_labels[label] for label in remove_labels]
+                )
+                st.success(f"관심종목 {removed}개를 삭제했습니다.")
+
+            selection_state = table_state.get("selection", {})
+            selected_rows = selection_state.get("rows", [])
+            if selected_rows:
+                selected_index = selected_rows[0]
+                if 0 <= selected_index < len(current):
+                    selected_item = current[selected_index]
+                    default_news_query = (
+                        selected_item.news_query
+                        or selected_item.abbreviated_name
+                        or selected_item.name_ko
+                    )
+                    st.markdown("#### 뉴스 검색 별칭")
+                    news_query = st.text_input(
+                        "기사에서 자주 쓰는 종목명",
+                        value=default_news_query,
+                        key=f"watchlist_news_query_{selected_item.symbol}",
+                        help=(
+                            "공식 종목명 대신 기사에서 자주 쓰는 짧은 이름을 "
+                            "뉴스 검색에 사용할 수 있습니다."
+                        ),
+                    )
+                    save_col, reset_col = st.columns(2)
+                    if save_col.button(
+                        "검색 별칭 저장",
+                        key=f"watchlist_news_query_save_{selected_item.symbol}",
+                    ):
+                        try:
+                            service.set_news_query(
+                                symbol=selected_item.symbol,
+                                news_query=news_query,
+                            )
+                            st.success(
+                                f"뉴스 검색 별칭을 '{news_query.strip()}'(으)로 "
+                                "저장했습니다."
+                            )
+                        except ValueError as exc:
+                            st.error(str(exc))
+                    if reset_col.button(
+                        "공식 약칭으로 초기화",
+                        disabled=selected_item.news_query is None,
+                        key=f"watchlist_news_query_reset_{selected_item.symbol}",
+                    ):
+                        service.set_news_query(
+                            symbol=selected_item.symbol,
+                            news_query=None,
+                        )
+                        st.success("뉴스 검색어를 KRX 공식 약칭으로 초기화했습니다.")
+                    st.caption(
+                        "예: 도화엔지니어링 → 도화. 너무 짧거나 일반적인 단어는 "
+                        "관련 없는 기사가 포함될 수 있습니다."
+                    )
+                    _render_watchlist_event_preview(
+                        settings,
+                        symbol=selected_item.symbol,
+                        name_ko=selected_item.name_ko,
+                    )
+        else:
+            st.info(
+                "등록된 관심종목이 없습니다. KOSPI 보통주를 검색해 "
+                "추가하세요."
+            )
+        st.code(
+            r".\.venv\Scripts\python.exe -m scripts.update_all",
+            language="powershell",
+        )
+        st.caption(
+            "위 한 줄을 실행하면 관심종목만 공시·뉴스·KIS 단계에서 "
+            "순서대로 갱신합니다."
+        )
+    finally:
+        service.close()
+
+
+def _render_symbol_lookup(settings: Settings) -> None:
     service: EventService | None = None
     try:
         service = EventService(settings)
@@ -308,9 +554,27 @@ def render_events(settings: Settings) -> None:
             _render_flows(snapshot)
         with status_tab:
             _render_availability(snapshot)
-    except (OSError, SQLAlchemyError, ValueError) as exc:
-        st.error(f"Phase 5 화면 초기화 실패: {type(exc).__name__}")
-        st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")
     finally:
         if service is not None:
             service.close()
+
+
+def render_events(settings: Settings) -> None:
+    st.markdown(
+        '<div class="status-kicker">Phase 5 · Events and reference data</div>',
+        unsafe_allow_html=True,
+    )
+    st.title("공시·뉴스·애널리스트·수급")
+    st.caption(
+        "공식 공시를 우선하며 뉴스, 애널리스트 추정, 실제 매매를 "
+        "서로 다른 데이터로 표시합니다."
+    )
+    try:
+        watchlist_tab, lookup_tab = st.tabs(["관심종목", "종목별 조회"])
+        with watchlist_tab:
+            _render_watchlist(settings)
+        with lookup_tab:
+            _render_symbol_lookup(settings)
+    except (OSError, SQLAlchemyError, ValueError) as exc:
+        st.error(f"Phase 5 화면 초기화 실패: {type(exc).__name__}")
+        st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")

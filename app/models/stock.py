@@ -68,10 +68,18 @@ class KrxStockMasterItem(BaseModel):
 
     @field_validator("symbol")
     @classmethod
-    def require_six_digit_symbol(cls, value: str) -> str:
+    def require_six_character_symbol(cls, value: str) -> str:
         normalized = value.strip()
-        if len(normalized) != 6 or not normalized.isdigit():
-            raise ValueError("KRX stock symbol must contain exactly six digits")
+        if (
+            len(normalized) != 6
+            or not normalized.isascii()
+            or not normalized.isalnum()
+            or normalized != normalized.upper()
+        ):
+            raise ValueError(
+                "KRX stock symbol must contain exactly six uppercase "
+                "alphanumeric characters"
+            )
         return normalized
 
     @field_validator(
@@ -148,8 +156,16 @@ class DartCorpCodeItem(BaseModel):
         if value is None or not value.strip():
             return None
         normalized = value.strip()
-        if len(normalized) != 6 or not normalized.isdigit():
-            raise ValueError("OpenDART stock_code must contain exactly six digits")
+        if (
+            len(normalized) != 6
+            or not normalized.isascii()
+            or not normalized.isalnum()
+            or normalized != normalized.upper()
+        ):
+            raise ValueError(
+                "OpenDART stock_code must contain exactly six uppercase ASCII "
+                "alphanumeric characters"
+            )
         return normalized
 
     @field_validator("corp_name")

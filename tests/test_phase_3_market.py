@@ -186,6 +186,57 @@ def test_index_provider_rejects_mismatched_date() -> None:
     assert response.payload is None
 
 
+def test_index_provider_skips_fully_blank_official_index_row() -> None:
+    blank_row = index_row(
+        IDX_NM="코스피 (외국주포함)",
+        CLSPRC_IDX="",
+        CMPPREVDD_IDX="",
+        FLUC_RT="",
+        OPNPRC_IDX="",
+        HGPRC_IDX="",
+        LWPRC_IDX="",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"OutBlock_1": [blank_row, index_row()]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = KrxIndexDailyProvider(
+        make_settings(krx_api_key="test-key"),
+        client,
+    )
+    response = asyncio.run(provider.fetch(as_of_date=date(2026, 7, 29)))
+    asyncio.run(client.aclose())
+
+    assert response.state == DataState.AVAILABLE
+    assert response.payload is not None
+    assert [item.index_name for item in response.payload] == ["코스피"]
+
+
+def test_index_provider_rejects_partially_blank_index_row() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"OutBlock_1": [index_row(CLSPRC_IDX="")]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = KrxIndexDailyProvider(
+        make_settings(krx_api_key="test-key"),
+        client,
+    )
+    response = asyncio.run(provider.fetch(as_of_date=date(2026, 7, 29)))
+    asyncio.run(client.aclose())
+
+    assert response.state == DataState.FETCH_FAILED
+    assert response.payload is None
+
+
 def test_index_service_does_not_store_http_error_as_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

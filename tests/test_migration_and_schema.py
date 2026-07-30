@@ -17,7 +17,7 @@ from tests.helpers import migrate_database
 
 def test_model_metadata_contains_required_tables() -> None:
     assert REQUIRED_TABLES <= set(Base.metadata.tables)
-    assert len(REQUIRED_TABLES) == 36
+    assert len(REQUIRED_TABLES) == 37
 
 
 def test_money_and_missing_values_use_numeric_nullable_columns() -> None:
@@ -45,8 +45,13 @@ def test_alembic_upgrade_creates_required_schema(
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "r4g7h8i9j0k1"
+            == "u7j0k1l2m3n4"
         )
+        watchlist_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("event_watchlist_items")
+        }
+        assert "news_query" in watchlist_columns
         stock_columns = {
             column["name"] for column in inspect(engine).get_columns("stocks")
         }
