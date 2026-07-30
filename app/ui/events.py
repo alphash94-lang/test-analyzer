@@ -383,6 +383,11 @@ def _render_watchlist(settings: Settings) -> None:
                     {
                         "종목코드": item.symbol,
                         "종목명": item.name_ko,
+                        "뉴스 검색어": (
+                            item.news_query
+                            or item.abbreviated_name
+                            or item.name_ko
+                        ),
                         "등록일": item.created_at.strftime("%Y-%m-%d"),
                     }
                     for item in current
@@ -420,6 +425,51 @@ def _render_watchlist(settings: Settings) -> None:
                 selected_index = selected_rows[0]
                 if 0 <= selected_index < len(current):
                     selected_item = current[selected_index]
+                    default_news_query = (
+                        selected_item.news_query
+                        or selected_item.abbreviated_name
+                        or selected_item.name_ko
+                    )
+                    st.markdown("#### 뉴스 검색 별칭")
+                    news_query = st.text_input(
+                        "기사에서 자주 쓰는 종목명",
+                        value=default_news_query,
+                        key=f"watchlist_news_query_{selected_item.symbol}",
+                        help=(
+                            "공식 종목명 대신 기사에서 자주 쓰는 짧은 이름을 "
+                            "뉴스 검색에 사용할 수 있습니다."
+                        ),
+                    )
+                    save_col, reset_col = st.columns(2)
+                    if save_col.button(
+                        "검색 별칭 저장",
+                        key=f"watchlist_news_query_save_{selected_item.symbol}",
+                    ):
+                        try:
+                            service.set_news_query(
+                                symbol=selected_item.symbol,
+                                news_query=news_query,
+                            )
+                            st.success(
+                                f"뉴스 검색 별칭을 '{news_query.strip()}'(으)로 "
+                                "저장했습니다."
+                            )
+                        except ValueError as exc:
+                            st.error(str(exc))
+                    if reset_col.button(
+                        "공식 약칭으로 초기화",
+                        disabled=selected_item.news_query is None,
+                        key=f"watchlist_news_query_reset_{selected_item.symbol}",
+                    ):
+                        service.set_news_query(
+                            symbol=selected_item.symbol,
+                            news_query=None,
+                        )
+                        st.success("뉴스 검색어를 KRX 공식 약칭으로 초기화했습니다.")
+                    st.caption(
+                        "예: 도화엔지니어링 → 도화. 너무 짧거나 일반적인 단어는 "
+                        "관련 없는 기사가 포함될 수 있습니다."
+                    )
                     _render_watchlist_event_preview(
                         settings,
                         symbol=selected_item.symbol,

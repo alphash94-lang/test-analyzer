@@ -33,5 +33,13 @@ class EventWatchlistService:
         with self._sessions.begin() as session:
             return self._repository.remove_symbols(session, symbols)
 
+    def set_news_query(self, *, symbol: str, news_query: str | None) -> None:
+        with self._sessions.begin() as session:
+            self._repository.set_news_query(
+                session,
+                symbol=symbol,
+                news_query=news_query,
+            )
+
     def close(self) -> None:
         self._engine.dispose()

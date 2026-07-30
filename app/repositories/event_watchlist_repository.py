@@ -17,6 +17,8 @@ WATCHLIST_MAX_ITEMS = 50
 class WatchlistStock:
     symbol: str
     name_ko: str
+    abbreviated_name: str | None
+    news_query: str | None
     created_at: datetime
 
 
@@ -41,6 +43,8 @@ class EventWatchlistRepository:
             select(
                 Stock.symbol,
                 Stock.name_ko,
+                Stock.abbreviated_name,
+                EventWatchlistItem.news_query,
                 EventWatchlistItem.created_at,
             )
             .join(Stock, Stock.id == EventWatchlistItem.stock_id)
@@ -51,10 +55,37 @@ class EventWatchlistRepository:
             WatchlistStock(
                 symbol=symbol,
                 name_ko=name_ko,
+                abbreviated_name=abbreviated_name,
+                news_query=news_query,
                 created_at=created_at,
             )
-            for symbol, name_ko, created_at in rows
+            for symbol, name_ko, abbreviated_name, news_query, created_at in rows
         )
+
+    @staticmethod
+    def set_news_query(
+        session: Session,
+        *,
+        symbol: str,
+        news_query: str | None,
+    ) -> None:
+        item = session.scalar(
+            select(EventWatchlistItem)
+            .join(Stock, Stock.id == EventWatchlistItem.stock_id)
+            .where(
+                Stock.symbol == symbol,
+                EventWatchlistItem.category == WATCHLIST_CATEGORY,
+            )
+        )
+        if item is None:
+            raise ValueError("관심종목에 등록된 종목만 뉴스 검색 별칭을 설정할 수 있습니다.")
+        normalized = news_query.strip() if news_query else None
+        if normalized and len(normalized) < 2:
+            raise ValueError("뉴스 검색 별칭은 2자 이상 입력해 주세요.")
+        if normalized and len(normalized) > 200:
+            raise ValueError("뉴스 검색 별칭은 200자 이하로 입력해 주세요.")
+        item.news_query = normalized or None
+        session.flush()
 
     def add_symbols(self, session: Session, symbols: list[str]) -> int:
         requested = tuple(dict.fromkeys(symbols))

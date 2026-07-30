@@ -74,6 +74,7 @@ class EventWatchlistItem(Base, CreatedAtMixin):
         nullable=False,
         default="INTEREST",
     )
+    news_query: Mapped[str | None] = mapped_column(String(200))
 
 
 class EventRecord(Base, CreatedAtMixin):

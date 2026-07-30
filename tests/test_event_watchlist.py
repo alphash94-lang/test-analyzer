@@ -58,6 +58,18 @@ def test_watchlist_persists_only_eligible_kospi_common_stocks(
         assert service.add_symbols(["005930", "000660", "005930"]) == 2
         assert service.add_symbols(["005930"]) == 0
         assert service.symbols() == ["000660", "005930"]
+        service.set_news_query(symbol="000660", news_query="하이닉스")
+        sk_hynix = next(
+            item for item in service.list_items() if item.symbol == "000660"
+        )
+        assert sk_hynix.news_query == "하이닉스"
+        with pytest.raises(ValueError, match="2자 이상"):
+            service.set_news_query(symbol="000660", news_query="하")
+        service.set_news_query(symbol="000660", news_query=None)
+        sk_hynix = next(
+            item for item in service.list_items() if item.symbol == "000660"
+        )
+        assert sk_hynix.news_query is None
         with pytest.raises(ValueError, match="활성 KOSPI 보통주"):
             service.add_symbols(["005935"])
         assert service.remove_symbols(["005930"]) == 1

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.models.disclosure import Disclosure
+from app.db.models.event import EventWatchlistItem
 from app.db.models.market import Stock
 from app.db.models.quality import ApiRawResponse
 from app.db.session import create_db_engine, create_session_factory
@@ -100,11 +101,25 @@ class EventService:
                 )
             stock_id = stock.id
             corp_code = stock.dart_corp_code
-            news_query = stock.abbreviated_name or stock.name_ko
+            custom_news_query = session.scalar(
+                select(EventWatchlistItem.news_query).where(
+                    EventWatchlistItem.stock_id == stock.id,
+                    EventWatchlistItem.category == "INTEREST",
+                )
+            )
+            news_query = (
+                custom_news_query
+                or stock.abbreviated_name
+                or stock.name_ko
+            )
             news_names = tuple(
                 dict.fromkeys(
                     name
-                    for name in (stock.abbreviated_name, stock.name_ko)
+                    for name in (
+                        custom_news_query,
+                        stock.abbreviated_name,
+                        stock.name_ko,
+                    )
                     if name
                 )
             )
