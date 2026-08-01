@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import pairwise
 
 from sqlalchemy import distinct, select
 from sqlalchemy.orm import Session
@@ -90,31 +91,26 @@ class Phase3InputRepository:
 
         stock_ids = [stock.id for stock in stocks]
         date_limit = max(61, self._settings.phase3_return_lookback_days + 1)
-        price_dates = list(
-            reversed(
-                session.scalars(
-                    select(distinct(PriceDaily.trade_date))
-                    .where(
-                        PriceDaily.stock_id.in_(stock_ids),
-                        PriceDaily.trade_date <= market_date,
-                        PriceDaily.source_provider
-                        == self._settings.phase3_adjusted_price_provider,
-                        PriceDaily.is_adjusted.is_(True),
-                        PriceDaily.adjustment_status == "VERIFIED",
-                        PriceDaily.data_state == DataState.AVAILABLE.value,
-                        PriceDaily.data_timing == DataTiming.PREVIOUS_CLOSE.value,
-                        PriceDaily.collected_at <= as_of_at,
-                    )
-                    .order_by(PriceDaily.trade_date.desc())
-                    .limit(date_limit)
-                ).all()
-            )
+        selected_price_provider = self._settings.phase3_adjusted_price_provider
+        price_dates = self._price_dates(
+            session,
+            stock_ids=stock_ids,
+            market_date=market_date,
+            as_of_at=as_of_at,
+            provider=selected_price_provider,
+            limit=date_limit,
         )
-        if (
-            len(price_dates) < date_limit
-            or not price_dates
-            or price_dates[-1] != market_date
-        ):
+        if not self._complete_price_dates(price_dates, market_date, date_limit):
+            selected_price_provider = "KRX"
+            price_dates = self._price_dates(
+                session,
+                stock_ids=stock_ids,
+                market_date=market_date,
+                as_of_at=as_of_at,
+                provider=selected_price_provider,
+                limit=date_limit,
+            )
+        if not self._complete_price_dates(price_dates, market_date, date_limit):
             return Phase3InputBundle(
                 index_points=index_points,
                 official_semiconductor_index_points=official_points,
@@ -124,19 +120,20 @@ class Phase3InputRepository:
                 proxy_kind=ProxyKind.NOT_AVAILABLE,
             )
 
-        price_rows = session.scalars(
-            select(PriceDaily).where(
-                PriceDaily.stock_id.in_(stock_ids),
-                PriceDaily.trade_date.in_(price_dates),
-                PriceDaily.source_provider
-                == self._settings.phase3_adjusted_price_provider,
+        price_statement = select(PriceDaily).where(
+            PriceDaily.stock_id.in_(stock_ids),
+            PriceDaily.trade_date.in_(price_dates),
+            PriceDaily.source_provider == selected_price_provider,
+            PriceDaily.data_state == DataState.AVAILABLE.value,
+            PriceDaily.data_timing == DataTiming.PREVIOUS_CLOSE.value,
+            PriceDaily.collected_at <= as_of_at,
+        )
+        if selected_price_provider != "KRX":
+            price_statement = price_statement.where(
                 PriceDaily.is_adjusted.is_(True),
                 PriceDaily.adjustment_status == "VERIFIED",
-                PriceDaily.data_state == DataState.AVAILABLE.value,
-                PriceDaily.data_timing == DataTiming.PREVIOUS_CLOSE.value,
-                PriceDaily.collected_at <= as_of_at,
             )
-        ).all()
+        price_rows = session.scalars(price_statement).all()
         prices_by_stock: dict[int, dict[date, PriceDaily]] = {}
         for row in price_rows:
             prices_by_stock.setdefault(row.stock_id, {})[row.trade_date] = row
@@ -149,11 +146,25 @@ class Phase3InputRepository:
             dates=(start_date, previous_date),
             as_of_at=as_of_at,
         )
+        configured_codes = {
+            value.strip()
+            for value in self._settings.phase3_semiconductor_classification_codes.split(
+                ","
+            )
+            if value.strip()
+        }
+        classification_system = (
+            self._settings.phase3_semiconductor_classification_system
+            if configured_codes
+            else "KIS_SEMICONDUCTOR_FLAG"
+        )
+        codes = configured_codes or {"Y"}
         classifications = self._classifications(
             session,
             stock_ids=stock_ids,
-            as_of_date=market_date,
+            as_of_date=as_of_date,
             as_of_at=as_of_at,
+            classification_system=classification_system,
         )
         dividend_payers = self._dividend_payers(
             session,
@@ -162,42 +173,29 @@ class Phase3InputRepository:
             as_of_at=as_of_at,
         )
 
-        codes = {
-            value.strip()
-            for value in self._settings.phase3_semiconductor_classification_codes.split(
-                ","
-            )
-            if value.strip()
-        }
-        proxy_kind = (
-            ProxyKind.OFFICIAL_INDEX
-            if official_points
-            and len(official_points) >= self._settings.phase3_return_lookback_days + 1
-            and len(index_points) >= self._settings.phase3_return_lookback_days + 1
-            and official_points[-1].trade_date == index_points[-1].trade_date
-            and official_points[
-                -(self._settings.phase3_return_lookback_days + 1)
-            ].trade_date
-            == index_points[
-                -(self._settings.phase3_return_lookback_days + 1)
-            ].trade_date
-            else (
-                ProxyKind.SELF_CALCULATED_PROXY
-                if codes and classifications
-                else ProxyKind.NOT_AVAILABLE
-            )
+        proxy_kind = self._proxy_kind(
+            index_points,
+            official_points,
+            lookback=self._settings.phase3_return_lookback_days + 1,
+            has_classifications=bool(classifications),
         )
         stock_by_id = {stock.id: stock for stock in stocks}
         observations: list[ConstituentObservation] = []
         for stock_id, stock_prices in prices_by_stock.items():
-            required_rows = [
-                stock_prices.get(start_date),
-                stock_prices.get(previous_date),
-                stock_prices.get(market_date),
+            continuity_rows = [
+                stock_prices[trade_date]
+                for trade_date in price_dates
+                if trade_date in stock_prices
             ]
-            if any(row is None for row in required_rows):
+            if not self._price_history_is_complete(
+                continuity_rows,
+                provider=selected_price_provider,
+                required_rows=date_limit,
+            ):
                 continue
-            start_row, previous_row, current_row = required_rows
+            start_row = stock_prices.get(start_date)
+            previous_row = stock_prices.get(previous_date)
+            current_row = stock_prices.get(market_date)
             if start_row is None or previous_row is None or current_row is None:
                 continue
             history_rows = [
@@ -227,7 +225,7 @@ class Phase3InputRepository:
             classification = classifications.get(stock_id)
             is_semiconductor = (
                 classification.classification_code in codes
-                if classification is not None and codes
+                if classification is not None
                 else None
             )
             stock = stock_by_id[stock_id]
@@ -281,6 +279,90 @@ class Phase3InputRepository:
         )
 
     @staticmethod
+    def _complete_price_dates(
+        dates: list[date],
+        market_date: date,
+        required_rows: int,
+    ) -> bool:
+        return len(dates) >= required_rows and dates[-1] == market_date
+
+    @staticmethod
+    def _proxy_kind(
+        index_points: list[IndexPoint],
+        official_points: list[IndexPoint],
+        *,
+        lookback: int,
+        has_classifications: bool,
+    ) -> ProxyKind:
+        if (
+            len(official_points) >= lookback
+            and len(index_points) >= lookback
+            and official_points[-1].trade_date == index_points[-1].trade_date
+            and official_points[-lookback].trade_date
+            == index_points[-lookback].trade_date
+        ):
+            return ProxyKind.OFFICIAL_INDEX
+        if has_classifications:
+            return ProxyKind.SELF_CALCULATED_PROXY
+        return ProxyKind.NOT_AVAILABLE
+
+    @classmethod
+    def _price_history_is_complete(
+        cls,
+        rows: list[PriceDaily],
+        *,
+        provider: str,
+        required_rows: int,
+    ) -> bool:
+        return len(rows) >= required_rows and (
+            provider != "KRX" or cls._krx_continuity_verified(rows)
+        )
+
+    @staticmethod
+    def _price_dates(
+        session: Session,
+        *,
+        stock_ids: list[int],
+        market_date: date,
+        as_of_at: datetime,
+        provider: str,
+        limit: int,
+    ) -> list[date]:
+        statement = select(distinct(PriceDaily.trade_date)).where(
+            PriceDaily.stock_id.in_(stock_ids),
+            PriceDaily.trade_date <= market_date,
+            PriceDaily.source_provider == provider,
+            PriceDaily.data_state == DataState.AVAILABLE.value,
+            PriceDaily.data_timing == DataTiming.PREVIOUS_CLOSE.value,
+            PriceDaily.collected_at <= as_of_at,
+        )
+        if provider != "KRX":
+            statement = statement.where(
+                PriceDaily.is_adjusted.is_(True),
+                PriceDaily.adjustment_status == "VERIFIED",
+            )
+        return list(
+            reversed(
+                session.scalars(
+                    statement.order_by(PriceDaily.trade_date.desc()).limit(limit)
+                ).all()
+            )
+        )
+
+    @staticmethod
+    def _krx_continuity_verified(rows: list[PriceDaily]) -> bool:
+        for previous, current in pairwise(rows):
+            if (
+                previous.close_price is None
+                or current.close_price is None
+                or current.previous_day_change is None
+                or current.close_price - current.previous_day_change
+                != previous.close_price
+            ):
+                return False
+        return True
+
+    @staticmethod
     def _market_caps(
         session: Session,
         *,
@@ -313,14 +395,14 @@ class Phase3InputRepository:
         stock_ids: list[int],
         as_of_date: date,
         as_of_at: datetime,
+        classification_system: str = "KRX_INDUSTRY",
     ) -> dict[int, StockClassification]:
         rows = session.scalars(
             select(StockClassification)
             .where(
                 StockClassification.stock_id.in_(stock_ids),
                 StockClassification.classification_system
-                == self._settings.phase3_semiconductor_classification_system,
-                StockClassification.source_provider == "KRX",
+                == classification_system,
                 StockClassification.data_state == DataState.AVAILABLE.value,
                 StockClassification.collected_at <= as_of_at,
                 (

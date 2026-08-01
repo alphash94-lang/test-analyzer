@@ -1585,7 +1585,7 @@ J. 원자료·데이터 출처
 
 초기 MVP 기술구성:
 
-- Python 3.12
+- Python 3.14
 - Streamlit
 - pandas 또는 polars
 - numpy

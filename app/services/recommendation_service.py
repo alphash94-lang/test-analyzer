@@ -29,6 +29,12 @@ from app.repositories.recommendation_repository import (
 )
 from app.repositories.scoring_repository import ScoringRepository
 from app.services.market_regime_service import MarketRegimeService
+from app.services.market_screening_service import (
+    SCREEN_RULE_VERSION,
+    SCREEN_SCORE_SCOPE,
+    SCREEN_SCORE_VERSION,
+    MarketScreeningService,
+)
 from app.services.phase2_input_service import Phase2InputAssembler
 from app.services.portfolio_service import (
     allocate_portfolio,
@@ -134,6 +140,17 @@ class RecommendationService:
                 session,
                 as_of_at=normalized_as_of,
             )
+            screening = MarketScreeningService().build(
+                session,
+                stocks,
+                as_of_at=normalized_as_of,
+            )
+            reference_prices = self._repository.verified_reference_prices(
+                session,
+                [stock.id for stock in stocks],
+                as_of_at=normalized_as_of,
+                provider=self._settings.phase3_adjusted_price_provider,
+            )
             total = len(stocks)
             order_amount = self._planned_order_amount(selected_profile)
             inputs: dict[int, RecommendationInput] = {}
@@ -161,17 +178,33 @@ class RecommendationService:
                     evidence,
                     self._phase2_rules,
                 )
+                strict_phase2 = phase2_result
+                screen = screening[stock.id]
+                phase2_result = phase2_result.model_copy(
+                    update={
+                        "score_version": SCREEN_SCORE_VERSION,
+                        "rule_version": SCREEN_RULE_VERSION,
+                        "input_data_hash": screen.input_data_hash,
+                        "score_scope": SCREEN_SCORE_SCOPE,
+                        "components": screen.components,
+                        "valuation_comparisons": (),
+                        "investment_score": screen.investment_score,
+                        "individual_entry_score": (
+                            screen.individual_entry_score
+                        ),
+                        "data_confidence": screen.data_confidence,
+                        "recommendation_computable": True,
+                        "missing_core_data": (),
+                        "explanation": screen.explanation,
+                        "data_state": DataState.AVAILABLE,
+                    }
+                )
                 score_row = self._scoring.save(
                     session,
                     stock.id,
                     phase2_result,
                 )
-                price = self._repository.verified_reference_price(
-                    session,
-                    stock.id,
-                    as_of_at=normalized_as_of,
-                    provider=self._settings.phase3_adjusted_price_provider,
-                )
+                price = reference_prices.get(stock.id)
                 recommendation_input = RecommendationInput(
                     stock_id=stock.id,
                     symbol=stock.symbol,
@@ -179,6 +212,7 @@ class RecommendationService:
                     phase2_snapshot_id=score_row.id,
                     phase2=phase2_result,
                     market=market_context,
+                    industry_code=screen.industry_code,
                     is_semiconductor=semiconductor_by_stock.get(stock.id),
                     reference_price=(price.close_price if price is not None else None),
                     reference_price_date=(
@@ -224,6 +258,12 @@ class RecommendationService:
                 )
                 raw_metrics = dict(decision.raw_metrics)
                 raw_metrics["phase2_snapshot_id"] = score_row.id
+                raw_metrics["strict_phase2_investment_score"] = (
+                    str(strict_phase2.investment_score)
+                    if strict_phase2.investment_score is not None
+                    else None
+                )
+                raw_metrics["screening_explanation"] = screen.explanation
                 decision = decision.model_copy(update={"raw_metrics": raw_metrics})
                 inputs[stock.id] = recommendation_input
                 decisions.append(decision)
@@ -405,24 +445,24 @@ class RecommendationService:
                 if latest is not None
                 else {}
             )
-            results: list[dict[str, object]] = []
-            for position, stock in self._repository.positions(
+            position_rows = self._repository.positions(
                 session,
                 profile_id,
-            ):
-                recommendation = recommendations.get(stock.id)
-                price = (
-                    self._repository.verified_reference_price(
-                        session,
-                        stock.id,
-                        as_of_at=latest.as_of_at,
-                        provider=(
-                            self._settings.phase3_adjusted_price_provider
-                        ),
-                    )
-                    if latest is not None
-                    else None
+            )
+            prices = (
+                self._repository.verified_reference_prices(
+                    session,
+                    [stock.id for _, stock in position_rows],
+                    as_of_at=latest.as_of_at,
+                    provider=self._settings.phase3_adjusted_price_provider,
                 )
+                if latest is not None
+                else {}
+            )
+            results: list[dict[str, object]] = []
+            for position, stock in position_rows:
+                recommendation = recommendations.get(stock.id)
+                price = prices.get(stock.id)
                 position_currency = (
                     position.currency.strip().upper()
                     if position.currency is not None
@@ -552,14 +592,21 @@ class RecommendationService:
     def _planned_order_amount(
         self,
         profile: PortfolioProfile,
-    ) -> Decimal | None:
-        if profile.total_capital is None or profile.total_capital <= 0:
-            return None
-        stock_cap = max(
-            profile.max_dividend_stock_weight,
-            profile.max_growth_stock_weight,
+    ) -> Decimal:
+        if profile.total_capital is not None and profile.total_capital > 0:
+            stock_cap = max(
+                profile.max_dividend_stock_weight,
+                profile.max_growth_stock_weight,
+            )
+            return (
+                profile.total_capital
+                * stock_cap
+                * self._phase4_rules.tranche_weights[0]
+            )
+        return (
+            self._settings.phase2_planned_order_amount_krw
+            or Decimal(1_000_000)
         )
-        return profile.total_capital * stock_cap * self._phase4_rules.tranche_weights[0]
 
     @staticmethod
     def _market_context(

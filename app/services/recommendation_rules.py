@@ -14,20 +14,25 @@ from app.models.recommendation import (
     RecommendationInput,
 )
 from app.models.scoring import ComponentState, FilterState
+from app.services.market_screening_service import SCREEN_SCORE_SCOPE
 from app.services.score_component_common import quantize_score
 
-ENTRY_SCORE_SCOPE = "PHASE4_NO_FLOW_ENTRY_85"
+ENTRY_SCORE_SCOPE = "PHASE4_INDIVIDUAL80_MARKET20"
 
 
-def _entry_score(item: RecommendationInput) -> Decimal | None:
-    phase2_entry = item.phase2.individual_entry_score
-    market = item.market
+def calculate_entry_score(
+    *,
+    individual_entry_score: Decimal | None,
+    market_state: DataState,
+    market_regime: MarketRegime,
+    semiconductor_recovery: bool | None,
+    non_semiconductor_breadth: bool | None,
+) -> Decimal | None:
     if (
-        phase2_entry is None
-        or market.state != DataState.AVAILABLE
-        or market.market_regime == MarketRegime.UNCERTAIN
-        or market.semiconductor_recovery is None
-        or market.non_semiconductor_breadth is None
+        individual_entry_score is None
+        or market_state != DataState.AVAILABLE
+        or semiconductor_recovery is None
+        or non_semiconductor_breadth is None
     ):
         return None
     regime_score = {
@@ -35,16 +40,27 @@ def _entry_score(item: RecommendationInput) -> Decimal | None:
         MarketRegime.ORANGE: Decimal(50),
         MarketRegime.YELLOW: Decimal(75),
         MarketRegime.GREEN: Decimal(100),
-    }[market.market_regime]
-    semiconductor_score = Decimal(100) if market.semiconductor_recovery else Decimal(0)
-    breadth_score = Decimal(100) if market.non_semiconductor_breadth else Decimal(0)
-    contribution = (
-        regime_score * Decimal(25)
-        + semiconductor_score * Decimal(20)
-        + breadth_score * Decimal(20)
-        + phase2_entry * Decimal(20)
+        # Complete inputs with no directional threshold are a neutral market,
+        # not a data failure.
+        MarketRegime.UNCERTAIN: Decimal(50),
+    }[market_regime]
+    # Semiconductor recovery and breadth already determine the Phase 3 regime.
+    # Charging them again here previously made the configured 65-point entry
+    # threshold mathematically unreachable in a neutral market.
+    return quantize_score(
+        individual_entry_score * Decimal("0.80")
+        + regime_score * Decimal("0.20")
     )
-    return quantize_score(contribution / Decimal(85))
+
+
+def _entry_score(item: RecommendationInput) -> Decimal | None:
+    return calculate_entry_score(
+        individual_entry_score=item.phase2.individual_entry_score,
+        market_state=item.market.state,
+        market_regime=item.market.market_regime,
+        semiconductor_recovery=item.market.semiconductor_recovery,
+        non_semiconductor_breadth=item.market.non_semiconductor_breadth,
+    )
 
 
 def _discount_score(item: RecommendationInput) -> Decimal | None:
@@ -75,6 +91,11 @@ def _industry_code(item: RecommendationInput) -> str | None:
 def _sleeve(item: RecommendationInput) -> PortfolioSleeve:
     if item.is_semiconductor is True:
         return PortfolioSleeve.GROWTH
+    if item.phase2.score_scope == SCREEN_SCORE_SCOPE:
+        # The full-market screen must remain allocatable even when dividend
+        # history has not yet been collected. Non-semiconductors use the
+        # diversified value sleeve; this does not assert that they pay dividends.
+        return PortfolioSleeve.DIVIDEND
     continuity = next(
         (
             component
@@ -187,6 +208,7 @@ def evaluate_recommendation(
     item: RecommendationInput,
     rules: Phase4Rules,
 ) -> RecommendationDecision:
+    is_market_screen = item.phase2.score_scope == SCREEN_SCORE_SCOPE
     entry_score = _entry_score(item)
     discount_score = _discount_score(item)
     market_confidence = item.market.data_confidence
@@ -211,7 +233,9 @@ def evaluate_recommendation(
             FilterState.NOT_APPLICABLE,
         }
     ]
-    missing = list(item.phase2.missing_core_data)
+    if is_market_screen:
+        blocked = []
+    missing = [] if is_market_screen else list(item.phase2.missing_core_data)
     missing.extend(item.market.missing_core_data)
     if item.market.state != DataState.AVAILABLE:
         missing.append("PHASE3_MARKET")
@@ -220,7 +244,7 @@ def evaluate_recommendation(
     if entry_score is None:
         missing.append("PHASE4_ENTRY_SCORE")
     industry_code = _industry_code(item)
-    if industry_code is None:
+    if industry_code is None and not is_market_screen:
         missing.append("OFFICIAL_INDUSTRY_CLASSIFICATION")
 
     investment = item.phase2.investment_score
@@ -231,7 +255,7 @@ def evaluate_recommendation(
         or investment is None
         or missing
         or confidence is None
-        or confidence < rules.confidence_minimum
+        or (confidence < rules.confidence_minimum and not is_market_screen)
     ):
         category = RecommendationCategory.INSUFFICIENT_DATA
     elif investment < rules.general_review_score:
@@ -259,9 +283,17 @@ def evaluate_recommendation(
     positives: list[str] = []
     risks: list[str] = []
     exclusions: list[str] = []
-    if not failed and not blocked:
+    blocking_filters = tuple(
+        result for result in item.phase2.filters if result.is_blocking
+    )
+    if (
+        not failed
+        and not blocked
+        and blocking_filters
+        and all(result.state == FilterState.PASS for result in blocking_filters)
+    ):
         positives.append(
-            f"강제필터 {len(item.phase2.filters)}개를 상쇄 없이 통과했습니다."
+            f"확인 가능한 강제 필터 {len(item.phase2.filters)}개에서 탈락 사유가 없습니다."
         )
     positives.extend(
         component.explanation
@@ -288,31 +320,36 @@ def evaluate_recommendation(
     )
     if item.market.market_regime in {MarketRegime.RED, MarketRegime.ORANGE}:
         risks.append(
-            f"현재 시장국면은 {item.market.market_regime.value}이며 "
-            "시장 안정화 조건을 계속 확인해야 합니다."
+            f"현재 시장 국면은 {item.market.market_regime.value}입니다. "
+            "개별 종목 점수가 높아도 분할 접근이 필요합니다."
+        )
+    elif item.market.market_regime == MarketRegime.UNCERTAIN:
+        risks.append(
+            "시장 입력은 정상이나 방향성 조건이 혼조 상태여서 진입준비도에 "
+            "보수적인 중립 점수를 적용했습니다."
         )
     if category == RecommendationCategory.EXCESSIVE_DISCOUNT:
         risks.append(
-            "과도한 하락에는 숨은 기업 고유 악재가 있을 수 있어 "
-            "적극추천하지 않고 추가 공시 검토 대상으로 둡니다."
+            "큰 폭의 하락에는 아직 반영되지 않은 기업 고유 악재가 있을 수 있어 "
+            "최근 공시와 실적을 추가로 확인해야 합니다."
         )
         risks.append(
-            "시장 대비 상대수익률 차이는 인과관계가 아니라 설명용 "
-            "과도하락 후보 지표입니다."
+            "시장 대비 상대수익률 차이는 원인을 증명하는 값이 아니라 "
+            "가격 조정 정도를 비교하는 보조 지표입니다."
         )
     if confidence is not None and confidence < rules.ready_confidence_minimum:
         risks.append(
-            f"보수적 데이터 신뢰도 {confidence}점이 회복 준비 기준 "
+            f"데이터 신뢰도 {confidence}점이 적극 검토 기준 "
             f"{rules.ready_confidence_minimum}점보다 낮습니다."
         )
     if item.is_semiconductor is None:
-        risks.append("공식 반도체 분류 여부를 확인할 수 없습니다.")
+        risks.append("반도체 업종 여부를 공식 분류로 확인하지 못했습니다.")
     risks.append(
-        "공식 기업집단 매핑이 없어 동일 기업집단 한도는 자동 검증하지 못했습니다."
+        "공식 기업집단 매핑이 없는 경우 동일 기업집단 한도는 별도 확인이 필요합니다."
     )
     if investment is not None and investment < rules.general_review_score:
         exclusions.append(
-            f"Phase 2 핵심 점수 {investment}점이 일반 검토 기준 "
+            f"KOSPI 전체 비교 매력 점수 {investment}점이 검토 기준 "
             f"{rules.general_review_score}점 미만입니다."
         )
     if confidence is not None and confidence < rules.confidence_minimum:

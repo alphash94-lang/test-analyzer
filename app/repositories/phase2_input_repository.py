@@ -24,6 +24,9 @@ from app.repositories.financial_repository import FinancialRepository
 INDUSTRY_KIND_SYSTEM = "KRX_INDUSTRY_KIND"
 DETAILED_INDUSTRY_SYSTEM = "KRX_INDUSTRY"
 PARENT_INDUSTRY_SYSTEM = "KRX_PARENT_INDUSTRY"
+DART_INDUSTRY_KIND_SYSTEM = "DART_INDUSTRY_KIND"
+DART_DETAILED_INDUSTRY_SYSTEM = "DART_INDUSTRY"
+DART_PARENT_INDUSTRY_SYSTEM = "DART_PARENT_INDUSTRY"
 MARKET_STATUS_TYPES = {
     "TRADING_STATUS",
     "MANAGEMENT_STATUS",
@@ -139,6 +142,19 @@ class Phase2InputRepository:
         ).all()
         if not rows:
             return []
+        verified_adjusted = [
+            row
+            for row in rows
+            if row.is_adjusted is True
+            and row.adjustment_status == "VERIFIED"
+        ]
+        if verified_adjusted:
+            provider = verified_adjusted[0].source_provider
+            return [
+                row
+                for row in verified_adjusted
+                if row.source_provider == provider
+            ]
         provider = rows[0].source_provider
         return [row for row in rows if row.source_provider == provider]
 
@@ -229,6 +245,30 @@ class Phase2InputRepository:
         as_of_at: datetime,
     ) -> tuple[Decimal | None, Decimal | None]:
         as_of_date = as_of_at.date()
+        metric_rows = session.scalars(
+            select(FinancialMetric)
+            .where(
+                FinancialMetric.stock_id == stock_id,
+                FinancialMetric.metric_code.in_(
+                    {"CURRENT_PER", "CURRENT_PBR"}
+                ),
+                FinancialMetric.period_end <= as_of_date,
+                FinancialMetric.collected_at <= as_of_at,
+                FinancialMetric.data_state == DataState.AVAILABLE.value,
+                FinancialMetric.value.is_not(None),
+            )
+            .order_by(
+                FinancialMetric.period_end.desc(),
+                FinancialMetric.id.desc(),
+            )
+        ).all()
+        current_metrics: dict[str, Decimal | None] = {}
+        for row in metric_rows:
+            current_metrics.setdefault(row.metric_code, row.value)
+        current_per = current_metrics.get("CURRENT_PER")
+        current_pbr = current_metrics.get("CURRENT_PBR")
+        if current_per is not None or current_pbr is not None:
+            return current_per, current_pbr
         _, values, currency, _ = self.financial_value_map(
             session,
             stock_id,
@@ -279,6 +319,8 @@ class Phase2InputRepository:
                     {
                         DETAILED_INDUSTRY_SYSTEM,
                         PARENT_INDUSTRY_SYSTEM,
+                        DART_DETAILED_INDUSTRY_SYSTEM,
+                        DART_PARENT_INDUSTRY_SYSTEM,
                     }
                 ),
                 StockClassification.data_state == DataState.AVAILABLE.value,
@@ -310,11 +352,19 @@ class Phase2InputRepository:
             for stock_id, values in by_stock.items()
             if (
                 detailed_industry is not None
-                and values.get(DETAILED_INDUSTRY_SYSTEM) == detailed_industry
+                and (
+                    values.get(DETAILED_INDUSTRY_SYSTEM) == detailed_industry
+                    or values.get(DART_DETAILED_INDUSTRY_SYSTEM)
+                    == detailed_industry
+                )
             )
             or (
                 parent_industry is not None
-                and values.get(PARENT_INDUSTRY_SYSTEM) == parent_industry
+                and (
+                    values.get(PARENT_INDUSTRY_SYSTEM) == parent_industry
+                    or values.get(DART_PARENT_INDUSTRY_SYSTEM)
+                    == parent_industry
+                )
             )
         }
         stocks = session.scalars(
@@ -346,8 +396,14 @@ class Phase2InputRepository:
             peers.append(
                 IndustryPeer(
                     symbol=peer_stock.symbol,
-                    detailed_industry=classification.get(DETAILED_INDUSTRY_SYSTEM),
-                    parent_industry=classification.get(PARENT_INDUSTRY_SYSTEM),
+                    detailed_industry=(
+                        classification.get(DETAILED_INDUSTRY_SYSTEM)
+                        or classification.get(DART_DETAILED_INDUSTRY_SYSTEM)
+                    ),
+                    parent_industry=(
+                        classification.get(PARENT_INDUSTRY_SYSTEM)
+                        or classification.get(DART_PARENT_INDUSTRY_SYSTEM)
+                    ),
                     per=per,
                     pbr=pbr,
                     roe=roe,

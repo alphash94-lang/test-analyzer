@@ -16,6 +16,7 @@ from app.models.recommendation import (
     SplitBuyStatus,
     SplitBuyTranche,
 )
+from app.services.market_screening_service import SCREEN_SCORE_SCOPE
 
 
 def phase4_rules_from_settings(settings: Settings) -> Phase4Rules:
@@ -213,13 +214,18 @@ def allocate_portfolio(
         in {
             RecommendationCategory.READY_FOR_RECOVERY,
             RecommendationCategory.QUALITY_WAIT,
+            RecommendationCategory.GENERAL_REVIEW,
         }
         and item.industry_code is not None
         and item.sleeve != PortfolioSleeve.UNCLASSIFIED
     ]
     eligible.sort(
         key=lambda item: (
-            item.category != RecommendationCategory.READY_FOR_RECOVERY,
+            {
+                RecommendationCategory.READY_FOR_RECOVERY: 0,
+                RecommendationCategory.QUALITY_WAIT: 1,
+                RecommendationCategory.GENERAL_REVIEW: 2,
+            }[item.category],
             -_merit(item),
             item.symbol,
         )
@@ -256,6 +262,8 @@ def allocate_portfolio(
     results: list[RecommendationDecision] = []
     for item in decisions:
         weight = weights.get(item.stock_id)
+        if weight is None and item.score_scope == SCREEN_SCORE_SCOPE:
+            weight = Decimal(0)
         initial = (
             weight * rules.tranche_weights[0]
             if weight is not None

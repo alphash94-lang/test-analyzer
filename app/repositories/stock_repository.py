@@ -180,6 +180,79 @@ class StockRepository:
                 )
         return mapped
 
+    def upsert_dart_industry(
+        self,
+        session: Session,
+        *,
+        stock: Stock,
+        industry_code: str,
+        as_of_at: datetime,
+        collected_at: datetime,
+    ) -> None:
+        kind = (
+            "FINANCIAL"
+            if industry_code[:2] in {"64", "65", "66"}
+            else "NON_FINANCIAL"
+        )
+        for system, code in {
+            "DART_INDUSTRY_KIND": kind,
+            "DART_INDUSTRY": industry_code,
+            "DART_PARENT_INDUSTRY": industry_code[:2],
+        }.items():
+            self._upsert_classification(
+                session,
+                stock=stock,
+                system=system,
+                code=code,
+                valid_from=as_of_at.date(),
+                as_of_at=as_of_at,
+                collected_at=collected_at,
+                provider="OpenDART",
+                function_name="기업개황",
+            )
+
+    def upsert_kis_semiconductor_flag(
+        self,
+        session: Session,
+        *,
+        stock: Stock,
+        flag: str,
+        as_of_at: datetime,
+        collected_at: datetime,
+    ) -> None:
+        self._upsert_classification(
+            session,
+            stock=stock,
+            system="KIS_SEMICONDUCTOR_FLAG",
+            code=flag,
+            valid_from=as_of_at.date(),
+            as_of_at=as_of_at,
+            collected_at=collected_at,
+            provider="한국투자증권",
+            function_name="KOSPI 종목마스터",
+        )
+
+    def upsert_kis_industry(
+        self,
+        session: Session,
+        *,
+        stock: Stock,
+        industry_name: str,
+        as_of_at: datetime,
+        collected_at: datetime,
+    ) -> None:
+        self._upsert_classification(
+            session,
+            stock=stock,
+            system="KIS_INDUSTRY_NAME",
+            code=industry_name,
+            valid_from=as_of_at.date(),
+            as_of_at=as_of_at,
+            collected_at=collected_at,
+            provider="한국투자증권",
+            function_name="주식현재가 시세(PER·PBR)",
+        )
+
     def mark_dart_unverified(
         self,
         session: Session,
@@ -264,6 +337,8 @@ class StockRepository:
         valid_from: date,
         as_of_at: datetime,
         collected_at: datetime,
+        provider: str = "KRX",
+        function_name: str = "유가증권 종목기본정보",
     ) -> None:
         row = session.scalar(
             select(StockClassification).where(
@@ -279,13 +354,15 @@ class StockRepository:
                 classification_system=system,
                 classification_code=code,
                 valid_from=valid_from,
-                source_provider="KRX",
-                source_function="유가증권 종목기본정보",
+                source_provider=provider,
+                source_function=function_name,
                 data_state=DataState.AVAILABLE.value,
                 collected_at=collected_at,
             )
             session.add(row)
         row.classification_name = code
+        row.source_provider = provider
+        row.source_function = function_name
         row.as_of_at = as_of_at
         row.collected_at = collected_at
         row.data_timing = DataTiming.NOT_APPLICABLE.value

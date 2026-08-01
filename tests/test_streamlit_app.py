@@ -1,8 +1,10 @@
+# pyright: reportArgumentType=false
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -10,10 +12,25 @@ from streamlit.testing.v1 import AppTest
 from app.config import Settings, get_settings
 from app.db.models.market import Stock
 from app.db.session import create_db_engine, create_session_factory
+from app.models.events import EarningsEstimateView
+from app.models.metadata import DataState
 from app.services.market_regime_service import MarketRegimeService
 from app.services.phase2_service import Phase2ScoringService
-from app.ui.stock_search import _format_going_concern
+from app.ui import market_dashboard as market_dashboard_ui
+from app.ui.recommendations import _entry_readiness_label, _sorted_decisions
+from app.ui.stock_search import (
+    _dividend_frequency,
+    _financial_chart_rows,
+    _format_dividend_yield,
+    _format_going_concern,
+    _format_phase2_decision,
+    _format_phase2_score,
+    _forward_per_from_estimates,
+    _stock_chart_rows,
+    _stock_detail_refresh_needs,
+)
 from app.utils.dates import SEOUL
+from app.utils.technical_indicators import AdjustedPricePoint
 from tests.helpers import migrate_database
 
 _API_CREDENTIAL_ENV_NAMES = (
@@ -58,12 +75,258 @@ def rendered_text(app: AppTest) -> str:
     )
 
 
+def test_forward_per_uses_nearest_future_period_and_latest_broker_values() -> None:
+    estimates = (
+        EarningsEstimateView(
+            provider="TEST",
+            broker="A증권",
+            metric_code="EPS",
+            fiscal_period="2026.12E",
+            estimate_value=Decimal(900),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 6, 1),
+            source_url=None,
+            is_estimate=True,
+        ),
+        EarningsEstimateView(
+            provider="TEST",
+            broker="A증권",
+            metric_code="EPS",
+            fiscal_period="2026.12E",
+            estimate_value=Decimal(1000),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 7, 1),
+            source_url=None,
+            is_estimate=True,
+        ),
+        EarningsEstimateView(
+            provider="TEST",
+            broker="B증권",
+            metric_code="FORWARD_EPS",
+            fiscal_period="2026.12E",
+            estimate_value=Decimal(1200),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 7, 2),
+            source_url=None,
+            is_estimate=True,
+        ),
+        EarningsEstimateView(
+            provider="TEST",
+            broker="A증권",
+            metric_code="EPS",
+            fiscal_period="2027.12E",
+            estimate_value=Decimal(2000),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 7, 3),
+            source_url=None,
+            is_estimate=True,
+        ),
+    )
+
+    forward_per, period, sample_count = _forward_per_from_estimates(
+        Decimal(11000),
+        estimates,
+        as_of_date=date(2026, 7, 31),
+    )
+
+    assert forward_per == Decimal(10)
+    assert period == "2026.12E"
+    assert sample_count == 2
+
+
+def test_forward_per_rejects_trailing_or_unverified_eps() -> None:
+    estimates = (
+        EarningsEstimateView(
+            provider="TEST",
+            broker="A증권",
+            metric_code="EPS",
+            fiscal_period="2025.12",
+            estimate_value=Decimal(1000),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 3, 1),
+            source_url=None,
+            is_estimate=True,
+        ),
+        EarningsEstimateView(
+            provider="TEST",
+            broker="B증권",
+            metric_code="EPS",
+            fiscal_period="2026.12E",
+            estimate_value=Decimal(1100),
+            unit="원/주",
+            currency="KRW",
+            published_date=date(2026, 7, 1),
+            source_url=None,
+            is_estimate=False,
+        ),
+    )
+
+    assert _forward_per_from_estimates(
+        Decimal(11000),
+        estimates,
+        as_of_date=date(2026, 7, 31),
+    ) == (None, None, 0)
+
+
+def test_entry_readiness_label_uses_configured_recommendation_threshold() -> None:
+    threshold = Decimal(65)
+
+    assert _entry_readiness_label(Decimal("64.999"), threshold) == "대기"
+    assert _entry_readiness_label(Decimal(65), threshold) == "진입 검토 가능"
+    assert _entry_readiness_label(None, threshold) == "계산 불가"
+
+
+def test_recommendation_display_orders_investment_before_entry_readiness() -> None:
+    high_investment = SimpleNamespace(
+        investment_score=Decimal(82),
+        entry_score=Decimal(60),
+        data_confidence=Decimal(98),
+    )
+    entry_ready_but_weaker = SimpleNamespace(
+        investment_score=Decimal(65),
+        entry_score=Decimal(68),
+        data_confidence=Decimal(98),
+    )
+
+    ordered = _sorted_decisions(
+        (entry_ready_but_weaker, high_investment),
+        entry_threshold=Decimal(65),
+    )
+
+    assert ordered == (high_investment, entry_ready_but_weaker)
+
+
+def test_stock_detail_refresh_does_not_repeat_for_verified_no_dividend() -> None:
+    as_of_date = date(2026, 7, 31)
+    snapshot = SimpleNamespace(
+        financial_history=[
+            SimpleNamespace(business_year=year, value=Decimal(1))
+            for year in (2023, 2024, 2025)
+        ],
+        dividends=(),
+    )
+    prices = [
+        SimpleNamespace(
+            trade_date=as_of_date - timedelta(days=125 - index)
+        )
+        for index in range(126)
+    ]
+
+    assert _stock_detail_refresh_needs(
+        snapshot,
+        prices,
+        as_of_date=as_of_date,
+    ) == (False, False)
+
+
 def test_verified_absence_of_going_concern_risk_is_not_shown_as_unknown() -> None:
     assert _format_going_concern("VERIFIED", False) == "중대한 불확실성 없음"
     assert (
         _format_going_concern("NOT_VERIFIED", False)
         == "확인 불가"
     )
+
+
+def test_phase2_decision_distinguishes_filter_failure_from_missing_data() -> None:
+    failed_filter = SimpleNamespace(
+        name="유동성",
+        is_blocking=True,
+        state=SimpleNamespace(value="FAIL"),
+    )
+    failed = SimpleNamespace(
+        recommendation_computable=False,
+        filters=[failed_filter],
+        missing_core_data=[],
+    )
+    missing = SimpleNamespace(
+        recommendation_computable=False,
+        filters=[],
+        missing_core_data=["MARKET_STATUS"],
+    )
+
+    assert _format_phase2_decision(failed) == "강제필터 미통과: 유동성"
+    assert _format_phase2_decision(missing) == "데이터 부족으로 계산 불가"
+    assert (
+        _format_phase2_score(None, failed)
+        == "강제필터 미통과로 미산출 (유동성)"
+    )
+    assert _format_phase2_score(None, missing) == "핵심 데이터 부족으로 미산출"
+
+
+def test_dividend_summary_reports_frequency_and_simple_yield() -> None:
+    annual = SimpleNamespace(
+        dps=Decimal(330),
+        dividend_type="CASH_DPS_ANNUAL",
+    )
+    first_quarter = SimpleNamespace(
+        dps=Decimal(80),
+        dividend_type="CASH_DPS_Q1",
+    )
+    latest_price = SimpleNamespace(
+        close_price=Decimal(4190),
+        currency="KRW",
+    )
+
+    assert _dividend_frequency((annual,)) == "연배당만 확인"
+    assert (
+        _dividend_frequency((annual, first_quarter))
+        == "분기배당 이력 확인"
+    )
+    assert _format_dividend_yield(Decimal(330), latest_price) == "7.88%"
+
+
+def test_financial_chart_normalizes_scale_and_calculates_growth() -> None:
+    values = {
+        2023: Decimal(1000),
+        2024: Decimal(1050),
+        2025: Decimal("1102.5"),
+    }
+
+    index_rows, index_title = _financial_chart_rows(
+        values,
+        "첫해=100 변화지수",
+    )
+    growth_rows, growth_title = _financial_chart_rows(
+        values,
+        "전년 대비 증감률(%)",
+    )
+
+    assert [row["값"] for row in index_rows] == [100.0, 105.0, 110.25]
+    assert index_title == "변화지수 (첫해=100)"
+    assert [row["값"] for row in growth_rows] == [5.0, 5.0]
+    assert growth_title == "전년 대비 증감률 (%)"
+
+
+def test_stock_chart_rows_calculate_moving_averages_before_visible_slice() -> None:
+    first_day = date(2026, 1, 1)
+    history = [
+        AdjustedPricePoint(
+            trade_date=first_day + timedelta(days=index),
+            open=Decimal(10_000 + index),
+            high=Decimal(10_100 + index),
+            low=Decimal(9_900 + index),
+            close=Decimal(10_000 + index),
+            volume=Decimal(1_000_000 + index),
+            is_adjusted=True,
+            adjustment_status="VERIFIED",
+            source_provider="KIS",
+        )
+        for index in range(130)
+    ]
+
+    rows = _stock_chart_rows(history, visible_days=65)
+
+    assert len(rows) == 65
+    assert rows[0]["날짜"] == (first_day + timedelta(days=65)).isoformat()
+    assert rows[-1]["MA5"] == pytest.approx(10_127)
+    assert rows[-1]["MA20"] == pytest.approx(10_119.5)
+    assert rows[-1]["MA60"] == pytest.approx(10_099.5)
+    assert rows[-1]["MA120"] == pytest.approx(10_069.5)
 
 
 def test_no_key_status_screen_opens_without_fake_market_data(
@@ -86,7 +349,7 @@ def test_no_key_status_screen_opens_without_fake_market_data(
     assert "ECOS" in text
     assert "데이터베이스" in text
     assert "키 미설정" in text
-    assert "지원 보류" in text
+    assert "연결 미검증" in text
     assert "연결됨" in text
     assert "추천 계산 가능 여부는 저장된 Phase 2" in text
 
@@ -145,8 +408,68 @@ def test_market_dashboard_without_inputs_shows_specific_connection_reason(
     assert not app.exception
     assert "저장된 Phase 3 시장 분석이 없습니다" in text
     assert "KRX 연결상태: 키 미설정" in text
+    assert any(button.label == "최신 시장국면 갱신" for button in app.button)
+    assert "최신 확정 일별 데이터 기준" in text
     assert "삼성전자" not in text
     assert "005930" not in text
+
+
+def test_market_dashboard_refresh_button_runs_data_and_regime_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    migrate_database(tmp_path / "refresh-market.db", monkeypatch)
+    get_settings.cache_clear()
+    calls: list[str] = []
+
+    class FakeDataService:
+        def __init__(self, _: Settings) -> None:
+            calls.append("data_init")
+
+        async def refresh(self, *, as_of_date: object) -> SimpleNamespace:
+            calls.append(f"data_refresh:{as_of_date}")
+            return SimpleNamespace(errors=())
+
+        def close(self) -> None:
+            calls.append("data_close")
+
+    class FakeRegimeService:
+        def __init__(self, _: Settings) -> None:
+            calls.append("regime_init")
+
+        def analyze_and_store(self, **_: object) -> SimpleNamespace:
+            calls.append("regime_analyze")
+            return SimpleNamespace(
+                state=DataState.AVAILABLE,
+                market_regime=SimpleNamespace(value="GREEN"),
+                missing_core_data=(),
+            )
+
+        def close(self) -> None:
+            calls.append("regime_close")
+
+    monkeypatch.setattr(
+        market_dashboard_ui,
+        "Phase3DataService",
+        FakeDataService,
+    )
+    monkeypatch.setattr(
+        market_dashboard_ui,
+        "MarketRegimeService",
+        FakeRegimeService,
+    )
+
+    app = AppTest.from_file("app/main.py", default_timeout=15).run()
+    app.radio[0].set_value("시장국면 대시보드").run()
+    refresh_button = next(
+        button for button in app.button if button.label == "최신 시장국면 갱신"
+    )
+    refresh_button.click().run()
+
+    assert not app.exception
+    assert any("시장국면 갱신 완료" in item.value for item in app.success)
+    assert "regime_analyze" in calls
+    assert calls[-2:] == ["data_close", "regime_close"]
 
 
 def test_saved_missing_market_snapshot_still_shows_provider_reasons(

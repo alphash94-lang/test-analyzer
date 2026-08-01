@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, cast
 
@@ -51,8 +52,9 @@ from app.providers.naver_news import (
 from app.repositories.data_quality_repository import DataQualityRepository
 from app.repositories.disclosure_repository import DisclosureRepository
 from app.repositories.event_repository import EventRepository
+from app.repositories.market_status_repository import MarketStatusRepository
 from app.repositories.raw_response_repository import RawResponseRepository
-from app.services.event_rules import classify_disclosure
+from app.services.event_rules import classify_disclosure, corporate_event_screen
 from app.utils.dates import now_kst
 
 
@@ -76,14 +78,26 @@ class EventService:
             title_similarity_threshold=settings.phase5_news_title_similarity,
             rule_version=settings.phase5_event_rule_version,
         )
+        self._market_status = MarketStatusRepository()
         self._engine = create_db_engine(settings)
         self._sessions = create_session_factory(self._engine)
+
+    @asynccontextmanager
+    async def shared_session(self):
+        """Reuse provider connection pools during a multi-stock refresh."""
+        async with AsyncExitStack() as stack:
+            for provider in (self._dart, self._news):
+                shared_session = getattr(provider, "shared_session", None)
+                if shared_session is not None:
+                    await stack.enter_async_context(shared_session())
+            yield
 
     async def refresh(
         self,
         *,
         symbol: str,
         as_of_date: date,
+        events_only: bool = False,
     ) -> Phase5RefreshSummary:
         if as_of_date > now_kst().date():
             raise ValueError("as_of_date must not be in the future")
@@ -160,6 +174,32 @@ class EventService:
                     stock_id=stock_id,
                     disclosures=disclosures,
                 )
+                if dart_state in {DataState.AVAILABLE, DataState.MISSING}:
+                    lower_bound = as_of_date - timedelta(
+                        days=self._settings.phase5_disclosure_lookback_days
+                    )
+                    event_value = corporate_event_screen(
+                        tuple(
+                            disclosure.report_name
+                            for disclosure in disclosures
+                            if disclosure.receipt_date >= lower_bound
+                        )
+                    )
+                    effective_from = datetime.combine(
+                        as_of_date,
+                        datetime.min.time(),
+                        tzinfo=now_kst().tzinfo,
+                    )
+                    self._market_status.upsert_daily(
+                        session,
+                        stock_id=stock_id,
+                        status_type="CORPORATE_EVENT_SCREEN",
+                        status_value=event_value,
+                        effective_from=effective_from,
+                        source_provider="OpenDART",
+                        source_function=DART_DISCLOSURE_FUNCTION,
+                        collected_at=now_kst(),
+                    )
         else:
             provider_states.append(DataState.MISSING)
             errors.append("OpenDART 고유번호가 매핑되지 않았습니다.")
@@ -263,18 +303,26 @@ class EventService:
                 or "네이버 뉴스 검색을 사용할 수 없습니다."
             )
 
-        (
-            analyst_opinions_stored,
-            investor_flows_stored,
-            program_trading_stored,
-            short_selling_stored,
-            kis_states,
-            kis_errors,
-        ) = await self._collect_kis_reference(
-            stock_id=stock_id,
-            symbol=symbol,
-            as_of_date=as_of_date,
-        )
+        if events_only:
+            analyst_opinions_stored = 0
+            investor_flows_stored = 0
+            program_trading_stored = 0
+            short_selling_stored = 0
+            kis_states: list[DataState] = []
+            kis_errors: list[str] = []
+        else:
+            (
+                analyst_opinions_stored,
+                investor_flows_stored,
+                program_trading_stored,
+                short_selling_stored,
+                kis_states,
+                kis_errors,
+            ) = await self._collect_kis_reference(
+                stock_id=stock_id,
+                symbol=symbol,
+                as_of_date=as_of_date,
+            )
         provider_states.extend(kis_states)
         errors.extend(kis_errors)
         with self._sessions() as session:

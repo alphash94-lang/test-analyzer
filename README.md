@@ -1,5 +1,9 @@
 # KOSPI Dividend & Semiconductor Rotation Analyzer
 
+종합 저평가 기능을 단계적으로 확장할 때 사용할 구현·검수 명령문은
+[종합 저평가 분석 단계별 Codex 프롬프트](docs/COMPREHENSIVE_UNDERVALUE_CODEX_PROMPTS.md)에
+정리되어 있다.
+
 한국어 표시명은 **코스피 배당주 저평가·시장회복 분석기**다.
 
 현재 구현 범위는 Phase 7 통합 검증과 배포 준비다. 기존 종목·가격·OpenDART 재무·배당·감사와
@@ -17,14 +21,14 @@ Phase 7은 새 투자 기능을 추가하지 않고 보안, 최신성 경고, �
 
 ## 요구 환경
 
-- Python 3.12
+- Python 3.14
 - Windows PowerShell 기준 명령
 - SQLite 기본 사용
 - PostgreSQL은 `DATABASE_URL`을 변경해 사용
 
 ## 초보자 빠른 시작
 
-1. Python 3.12를 설치하고 이 디렉터리에서 PowerShell을 연다.
+1. Python 3.14를 설치하고 이 디렉터리에서 PowerShell을 연다.
 2. 아래 **설치** 명령으로 가상환경과 의존성을 준비한다.
 3. `example`을 `.env`로 복사한다. API 키가 없으면 값은 비워 둔다.
 4. `python -m alembic upgrade head`로 DB를 만든다.
@@ -43,7 +47,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-시스템에 Python 3.12가 PATH로 등록되지 않았다면 설치된 Python 3.12 실행 파일의 전체 경로를 사용한다.
+시스템에 Python 3.14가 PATH로 등록되지 않았다면 설치된 Python 3.14 실행 파일의 전체 경로를 사용한다.
 
 ## 환경변수
 
@@ -160,7 +164,7 @@ UPDATE_FAILURE_WEBHOOK_URL=https://hooks.slack.com/services/...
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml`은 pull request와 `main` push마다 Python 3.12에서
+`.github/workflows/ci.yml`은 pull request와 `main` push마다 Python 3.14에서
 의존성 검사, 소스 컴파일, Ruff, Pyright, Alembic 마이그레이션 검증과 전체
 pytest를 실행한다. CI 실패 알림을 받으려면 저장소
 **Settings > Secrets and variables > Actions**에

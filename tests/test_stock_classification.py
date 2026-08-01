@@ -159,3 +159,16 @@ def test_kospi_membership_uses_only_exact_official_market_value() -> None:
     assert kospi_code.is_kospi is True
     assert unknown.is_kospi is None
     assert unknown.universe_status == UniverseStatus.REVIEW_REQUIRED
+
+
+def test_kosdaq_market_is_recognized_without_changing_stock_structure() -> None:
+    payload = minimum_item(name="코스닥검증").model_dump(by_alias=True)
+    payload["MKT_TP_NM"] = "KOSDAQ"
+
+    result = classify_krx_stock(
+        KrxStockMasterItem.model_validate(payload)
+    )
+
+    assert result.is_kospi is False
+    assert result.product_type == ProductType.STOCK
+    assert result.share_class == ShareClass.COMMON

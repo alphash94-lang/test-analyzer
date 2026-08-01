@@ -150,6 +150,215 @@ class KrxDailyPriceItem(BaseModel):
         )
 
 
+class KisAdjustedDailyPriceItem(BaseModel):
+    """KIS domestic daily bars requested with FID_ORG_ADJ_PRC=0."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    trade_date: date = Field(alias="stck_bsop_date")
+    close_price: Decimal = Field(alias="stck_clpr")
+    open_price: Decimal = Field(alias="stck_oprc")
+    high_price: Decimal = Field(alias="stck_hgpr")
+    low_price: Decimal = Field(alias="stck_lwpr")
+    volume: Decimal = Field(alias="acml_vol")
+    trading_value: Decimal | None = Field(default=None, alias="acml_tr_pbmn")
+    modified: str | None = Field(default=None, alias="mod_yn")
+    revision_reason: str | None = Field(default=None, alias="revl_issu_reas")
+
+    @field_validator("trade_date", mode="before")
+    @classmethod
+    def parse_trade_date(cls, value: object) -> date:
+        normalized = str(value).strip().replace("-", "")
+        if len(normalized) != 8 or not normalized.isdigit():
+            raise ValueError("KIS stck_bsop_date must use YYYYMMDD")
+        return date(
+            int(normalized[:4]),
+            int(normalized[4:6]),
+            int(normalized[6:8]),
+        )
+
+    @field_validator(
+        "close_price",
+        "open_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "trading_value",
+        mode="before",
+    )
+    @classmethod
+    def parse_number(cls, value: object) -> Decimal | None:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            result = Decimal(str(value).strip().replace(",", ""))
+        except InvalidOperation as exc:
+            raise ValueError("KIS daily price numeric field is invalid") from exc
+        if not result.is_finite() or result < 0:
+            raise ValueError("KIS daily price values must be finite and non-negative")
+        return result
+
+    @field_validator("modified", "revision_reason", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> KisAdjustedDailyPriceItem:
+        if self.volume == 0 and not any(
+            (self.open_price, self.high_price, self.low_price)
+        ):
+            return self
+        if self.high_price < max(
+            self.open_price,
+            self.low_price,
+            self.close_price,
+        ):
+            raise ValueError("KIS high price is inconsistent with OHLC")
+        if self.low_price > min(
+            self.open_price,
+            self.high_price,
+            self.close_price,
+        ):
+            raise ValueError("KIS low price is inconsistent with OHLC")
+        return self
+
+
+class KisCurrentValuationItem(BaseModel):
+    """KIS domestic current-price and valuation fields."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    current_price: Decimal = Field(alias="stck_prpr")
+    previous_day_change: Decimal | None = Field(
+        default=None,
+        alias="prdy_vrss",
+    )
+    change_rate: Decimal | None = Field(default=None, alias="prdy_ctrt")
+    open_price: Decimal | None = Field(default=None, alias="stck_oprc")
+    high_price: Decimal | None = Field(default=None, alias="stck_hgpr")
+    low_price: Decimal | None = Field(default=None, alias="stck_lwpr")
+    volume: Decimal | None = Field(default=None, alias="acml_vol")
+    trading_value: Decimal | None = Field(
+        default=None,
+        alias="acml_tr_pbmn",
+    )
+    per: Decimal | None = None
+    pbr: Decimal | None = None
+    eps: Decimal | None = None
+    bps: Decimal | None = None
+    industry_name: str | None = Field(default=None, alias="bstp_kor_isnm")
+
+    @field_validator(
+        "current_price",
+        "previous_day_change",
+        "change_rate",
+        "open_price",
+        "high_price",
+        "low_price",
+        "volume",
+        "trading_value",
+        "per",
+        "pbr",
+        "eps",
+        "bps",
+        mode="before",
+    )
+    @classmethod
+    def parse_valuation_number(cls, value: object) -> Decimal | None:
+        if value is None or str(value).strip() in {"", "-"}:
+            return None
+        try:
+            result = Decimal(str(value).strip().replace(",", ""))
+        except InvalidOperation as exc:
+            raise ValueError("KIS valuation field is invalid") from exc
+        if not result.is_finite():
+            raise ValueError("KIS valuation field must be finite")
+        return result
+
+    @field_validator("industry_name", mode="before")
+    @classmethod
+    def normalize_industry_name(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    @model_validator(mode="after")
+    def validate_current_valuation(self) -> KisCurrentValuationItem:
+        if self.current_price <= 0:
+            raise ValueError("KIS current price must be positive")
+        for name in (
+            "open_price",
+            "high_price",
+            "low_price",
+            "volume",
+            "trading_value",
+        ):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"KIS {name} must not be negative")
+        return self
+
+
+class KisEstimatePerformanceRow(BaseModel):
+    """One ordered row from KIS estimate-perform output3."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    data1: Decimal | None = None
+    data2: Decimal | None = None
+    data3: Decimal | None = None
+    data4: Decimal | None = None
+    data5: Decimal | None = None
+
+    @field_validator("data1", "data2", "data3", "data4", "data5", mode="before")
+    @classmethod
+    def parse_estimate_number(cls, value: object) -> Decimal | None:
+        if value is None or str(value).strip() in {"", "-"}:
+            return None
+        try:
+            result = Decimal(str(value).strip().replace(",", ""))
+        except InvalidOperation as exc:
+            raise ValueError("KIS estimate field is invalid") from exc
+        if not result.is_finite():
+            raise ValueError("KIS estimate field must be finite")
+        return result
+
+    @property
+    def values(self) -> tuple[Decimal | None, ...]:
+        return (self.data1, self.data2, self.data3, self.data4, self.data5)
+
+
+class KisEstimatePeriodItem(BaseModel):
+    """Ordered fiscal period from KIS estimate-perform output4."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    fiscal_period: str = Field(alias="dt")
+
+    @field_validator("fiscal_period", mode="before")
+    @classmethod
+    def normalize_period(cls, value: object) -> str:
+        period = str(value).strip()
+        if len(period) < 7 or not period[:4].isdigit():
+            raise ValueError("KIS estimate period is invalid")
+        return period
+
+
+class KisForwardValuationItem(BaseModel):
+    fiscal_period: str
+    forward_eps: Decimal
+    forward_per: Decimal
+
+    @model_validator(mode="after")
+    def validate_forward_valuation(self) -> KisForwardValuationItem:
+        if self.forward_eps <= 0 or self.forward_per <= 0:
+            raise ValueError("KIS forward EPS and PER must be positive")
+        return self
+
+
 class LatestDailyPrice(BaseModel):
     symbol: str
     trade_date: date

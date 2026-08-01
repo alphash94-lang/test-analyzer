@@ -32,7 +32,7 @@ def test_no_keys_show_no_connected_external_provider(
         "KRX": ConnectionState.NOT_CONFIGURED,
         "OpenDART": ConnectionState.NOT_CONFIGURED,
         "한국투자증권": ConnectionState.NOT_CONFIGURED,
-        "KIND": ConnectionState.DEFERRED,
+        "KIND": ConnectionState.NOT_VERIFIED,
         "네이버 뉴스": ConnectionState.NOT_CONFIGURED,
         "ECOS": ConnectionState.NOT_CONFIGURED,
         "데이터베이스": ConnectionState.CONNECTED,
@@ -140,4 +140,42 @@ def test_ecos_successful_attempt_marks_provider_connected(
         )
 
     assert as_mapping(settings)["ECOS"] == ConnectionState.CONNECTED
+    engine.dispose()
+
+
+def test_empty_http_200_result_still_marks_provider_connected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "empty-success.db", monkeypatch)
+    settings = make_settings(
+        database_url=database_url,
+        dart_api_key="configured",
+    )
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    with sessions.begin() as session:
+        session.add(
+            ApiRawResponse(
+                provider="OpenDART",
+                function_name="단일회사 전체 재무제표",
+                request_params_hash="1" * 64,
+                received_at=now_kst(),
+                http_status=200,
+                response_hash="2" * 64,
+                normalized_success=False,
+                data_state="MISSING",
+                error_code="013",
+                error_message="조회된 데이터 없음",
+            )
+        )
+
+    status = next(
+        item
+        for item in get_connection_statuses(settings)
+        if item.provider == "OpenDART"
+    )
+
+    assert status.state == ConnectionState.CONNECTED
+    assert "연결은 정상" in status.detail
     engine.dispose()

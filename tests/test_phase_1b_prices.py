@@ -115,6 +115,38 @@ def test_provider_rejects_response_for_different_date() -> None:
     assert response.payload is None
 
 
+def test_kosdaq_daily_price_provider_uses_kosdaq_contract() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/sto/ksq_bydd_trd")
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "OutBlock_1": [
+                    daily_row(
+                        ISU_CD="098120",
+                        ISU_NM="마이크로컨텍솔",
+                        MKT_NM="KOSDAQ",
+                    )
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = KrxDailyPriceProvider(
+        make_settings(krx_api_key="test-key"),
+        client,
+        market="KOSDAQ",
+    )
+    response = asyncio.run(provider.fetch(as_of_date=date(2026, 7, 29)))
+    asyncio.run(client.aclose())
+
+    assert response.state == DataState.AVAILABLE
+    assert response.payload is not None
+    assert response.payload[0].market_name == "KOSDAQ"
+    assert response.metadata.function_name == "코스닥 일별매매정보"
+
+
 def test_http_error_is_not_stored_as_available_price(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -201,7 +233,8 @@ def test_repository_upserts_idempotently_and_reports_unmatched(
     assert second == (1, 0)
     assert stored_row.currency is None
     assert latest["000001"].close_price == Decimal(10000)
-    assert latest["000001"].is_adjusted is None
+    assert latest["000001"].is_adjusted is False
+    assert stored_row.adjustment_status == "RAW_OFFICIAL"
     assert latest["000001"].collected_at.utcoffset() is not None
     engine.dispose()
 

@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.config import Settings
 from app.db.models.quality import ApiRawResponse
 from app.db.session import create_db_engine
+from app.models.metadata import DataState
 from app.models.status import ConnectionState, ConnectionStatusItem
 from app.utils.dates import now_kst, restore_database_kst
 
@@ -86,7 +87,7 @@ def _credential_status(
             checked_at=checked_at,
         )
     if latest_attempt is not None and (
-        latest_attempt.data_state == "AVAILABLE"
+        latest_attempt.data_state in {"AVAILABLE", "MISSING"}
         and latest_attempt.http_status is not None
         and 200 <= latest_attempt.http_status <= 299
     ):
@@ -102,8 +103,12 @@ def _credential_status(
                 else ConnectionState.CONNECTED
             ),
             detail=(
-                "저장된 원응답에서 HTTP 2xx 및 AVAILABLE 검증 성공을 "
-                "확인했습니다. "
+                "저장된 원응답에서 인증된 HTTP 2xx 응답을 확인했습니다. "
+                + (
+                    "최근 조회 조건에는 결과가 없었지만 연결은 정상입니다. "
+                    if latest_attempt.data_state == "MISSING"
+                    else "사용 가능한 데이터 응답도 확인했습니다. "
+                )
                 + (
                     f"마지막 성공이 {freshness_warning_hours}시간 "
                     "최신성 경고 기준을 초과했습니다. "
@@ -236,6 +241,49 @@ def _database_status(settings: Settings) -> ConnectionStatusItem:
     )
 
 
+def _public_provider_status(
+    provider: str,
+    *,
+    latest_attempt: ProviderAttempt | None,
+    freshness_warning_hours: int,
+) -> ConnectionStatusItem:
+    checked_at = now_kst()
+    if latest_attempt is None:
+        return ConnectionStatusItem(
+            provider=provider,
+            state=ConnectionState.NOT_VERIFIED,
+            detail="공식 공개 조회를 아직 실행하지 않았습니다.",
+            checked_at=checked_at,
+        )
+    received_at = restore_database_kst(latest_attempt.received_at)
+    if (
+        latest_attempt.data_state == DataState.AVAILABLE.value
+        and latest_attempt.http_status is not None
+        and 200 <= latest_attempt.http_status <= 299
+    ):
+        stale = checked_at - received_at > timedelta(
+            hours=freshness_warning_hours
+        )
+        return ConnectionStatusItem(
+            provider=provider,
+            state=ConnectionState.STALE if stale else ConnectionState.CONNECTED,
+            detail=(
+                "공식 공개 목록 응답과 정규화를 확인했습니다. 마지막 수집: "
+                f"{received_at.strftime('%Y-%m-%d %H:%M:%S KST')}"
+            ),
+            checked_at=checked_at,
+        )
+    return ConnectionStatusItem(
+        provider=provider,
+        state=ConnectionState.FAILED,
+        detail=(
+            "최근 공식 공개 조회가 실패했습니다. "
+            f"상태={latest_attempt.data_state}, HTTP={latest_attempt.http_status}"
+        ),
+        checked_at=checked_at,
+    )
+
+
 def get_connection_statuses(settings: Settings) -> list[ConnectionStatusItem]:
     """Return truthful configuration states without performing external API calls."""
 
@@ -262,11 +310,10 @@ def get_connection_statuses(settings: Settings) -> list[ConnectionStatusItem]:
             latest_attempt=latest_attempts.get("한국투자증권"),
             freshness_warning_hours=settings.data_freshness_warning_hours,
         ),
-        ConnectionStatusItem(
-            provider="KIND",
-            state=ConnectionState.DEFERRED,
-            detail="공식 공개 API 계약과 자동 수집 권한 확인 전까지 지원을 보류합니다.",
-            checked_at=now_kst(),
+        _public_provider_status(
+            "KIND",
+            latest_attempt=latest_attempts.get("KIND"),
+            freshness_warning_hours=settings.data_freshness_warning_hours,
         ),
         _naver_status(
             settings,
@@ -302,6 +349,7 @@ def _latest_raw_provider_attempts(
                             "Naver API HUB",
                             "한국투자증권",
                             "ECOS",
+                            "KIND",
                         )
                     )
                 )

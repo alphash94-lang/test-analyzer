@@ -59,16 +59,17 @@ def classify_krx_stock(item: KrxStockMasterItem) -> ClassifiedStock:
 
     product_type = _product_type(item.security_group_name)
     share_class = _share_class(item.certificate_type_name)
-    is_kospi = (
-        True
-        if item.market_type_name in {"유가증권시장", "KOSPI"}
-        else None
-    )
+    if item.market_type_name in {"유가증권시장", "KOSPI"}:
+        is_kospi: bool | None = True
+    elif item.market_type_name in {"코스닥시장", "KOSDAQ"}:
+        is_kospi = False
+    else:
+        is_kospi = None
 
-    if is_kospi is not True:
+    if is_kospi is None:
         universe_status = UniverseStatus.REVIEW_REQUIRED
         quality_state = StockQualityState.REVIEW_REQUIRED
-        review_reason = "공식 시장구분 값으로 KOSPI 여부를 확정할 수 없습니다."
+        review_reason = "공식 시장구분 값으로 KOSPI·KOSDAQ 여부를 확정할 수 없습니다."
     elif product_type in {
         ProductType.ETF,
         ProductType.ETN,

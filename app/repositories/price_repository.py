@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models.market import PriceDaily, Stock
 from app.models.metadata import DataState, DataTiming
-from app.models.price import KrxDailyPriceItem, LatestDailyPrice
+from app.models.price import (
+    KisAdjustedDailyPriceItem,
+    KrxDailyPriceItem,
+    LatestDailyPrice,
+)
 from app.repositories.data_quality_repository import DataQualityRepository
 from app.utils.dates import restore_database_kst
 from app.utils.technical_indicators import AdjustedPricePoint
@@ -76,12 +80,13 @@ class PriceRepository:
             row.high_price = item.high_price
             row.low_price = item.low_price
             row.close_price = item.close_price
+            row.previous_day_change = item.previous_day_change
             row.volume = item.volume
             row.trading_value = item.trading_value
             row.market_cap = item.market_cap
             row.listed_shares = item.listed_shares
-            row.is_adjusted = None
-            row.adjustment_status = "NOT_VERIFIED"
+            row.is_adjusted = False
+            row.adjustment_status = "RAW_OFFICIAL"
             row.source_function = "유가증권 일별매매정보"
             row.data_state = DataState.AVAILABLE.value
             row.as_of_at = as_of_at
@@ -90,6 +95,63 @@ class PriceRepository:
             stored += 1
         session.flush()
         return stored, unmatched
+
+    def upsert_kis_adjusted_records(
+        self,
+        session: Session,
+        symbol: str,
+        records: list[KisAdjustedDailyPriceItem],
+        *,
+        as_of_at: datetime,
+        collected_at: datetime,
+    ) -> int:
+        stock = session.scalar(
+            select(Stock).where(
+                Stock.symbol == symbol,
+                Stock.is_active.is_(True),
+            )
+        )
+        if stock is None:
+            raise ValueError(f"active stock not found: {symbol}")
+        stored = 0
+        for item in records:
+            row = session.scalar(
+                select(PriceDaily).where(
+                    PriceDaily.stock_id == stock.id,
+                    PriceDaily.trade_date == item.trade_date,
+                    PriceDaily.source_provider == "한국투자증권",
+                )
+            )
+            if row is None:
+                row = PriceDaily(
+                    stock_id=stock.id,
+                    trade_date=item.trade_date,
+                    source_provider="한국투자증권",
+                    source_function="국내주식기간별시세(수정주가)",
+                    data_state=DataState.AVAILABLE.value,
+                    collected_at=collected_at,
+                )
+                session.add(row)
+            row.currency = "KRW"
+            row.open_price = item.open_price
+            row.high_price = item.high_price
+            row.low_price = item.low_price
+            row.close_price = item.close_price
+            row.previous_day_change = None
+            row.volume = item.volume
+            row.trading_value = item.trading_value
+            row.market_cap = None
+            row.listed_shares = None
+            row.is_adjusted = True
+            row.adjustment_status = "VERIFIED"
+            row.source_function = "국내주식기간별시세(수정주가)"
+            row.data_state = DataState.AVAILABLE.value
+            row.as_of_at = as_of_at
+            row.collected_at = collected_at
+            row.data_timing = DataTiming.PREVIOUS_CLOSE.value
+            stored += 1
+        session.flush()
+        return stored
 
     def latest_for_symbols(
         self,
@@ -107,6 +169,48 @@ class PriceRepository:
                 PriceDaily.data_state == DataState.AVAILABLE.value,
             )
             .order_by(Stock.symbol, PriceDaily.trade_date.desc())
+        ).all()
+        result: dict[str, LatestDailyPrice] = {}
+        for symbol, row in rows:
+            if symbol in result or row.close_price is None:
+                continue
+            result[symbol] = LatestDailyPrice(
+                symbol=symbol,
+                trade_date=row.trade_date,
+                close_price=row.close_price,
+                currency=row.currency,
+                volume=row.volume,
+                trading_value=row.trading_value,
+                market_cap=row.market_cap,
+                is_adjusted=row.is_adjusted,
+                source_provider=row.source_provider,
+                state=DataState(row.data_state),
+                as_of_at=restore_database_kst(row.as_of_at),
+                collected_at=restore_database_kst(row.collected_at),
+            )
+        return result
+
+    def latest_adjusted_for_symbols(
+        self,
+        session: Session,
+        symbols: list[str],
+    ) -> dict[str, LatestDailyPrice]:
+        if not symbols:
+            return {}
+        rows = session.execute(
+            select(Stock.symbol, PriceDaily)
+            .join(PriceDaily, PriceDaily.stock_id == Stock.id)
+            .where(
+                Stock.symbol.in_(symbols),
+                PriceDaily.is_adjusted.is_(True),
+                PriceDaily.adjustment_status == "VERIFIED",
+                PriceDaily.data_state == DataState.AVAILABLE.value,
+            )
+            .order_by(
+                Stock.symbol,
+                PriceDaily.trade_date.desc(),
+                PriceDaily.collected_at.desc(),
+            )
         ).all()
         result: dict[str, LatestDailyPrice] = {}
         for symbol, row in rows:
@@ -178,6 +282,8 @@ class PriceRepository:
                 is_adjusted=row.is_adjusted,
                 adjustment_status=row.adjustment_status,
                 source_provider=row.source_provider,
+                open=row.open_price,
+                volume=row.volume,
             )
             for row in reversed(selected_rows)
             if row.high_price is not None

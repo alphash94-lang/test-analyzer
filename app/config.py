@@ -58,7 +58,9 @@ class Settings(BaseSettings):
         ge=0,
     )
     phase2_repeated_loss_years: int = Field(default=2, ge=1)
-    phase2_industry_minimum_sample: int = Field(default=10, ge=2)
+    # Five comparable companies is enough to calculate a provisional sector
+    # median.  Sample size is already penalized separately in data confidence.
+    phase2_industry_minimum_sample: int = Field(default=5, ge=2)
     phase2_history_minimum_sample: int = Field(default=3, ge=2)
     phase2_confidence_minimum: Decimal = Field(
         default=Decimal(70),
@@ -141,6 +143,11 @@ class Settings(BaseSettings):
     phase3_stabilization_days: int = Field(default=5, ge=3, le=20)
     phase3_samsung_symbol: str = "005930"
     phase3_sk_hynix_symbol: str = "000660"
+    realtime_market_interval_seconds: int = Field(default=300, ge=60, le=3600)
+    realtime_market_snapshot_path: Path = Path(
+        "data/realtime_market_snapshot.json"
+    )
+    realtime_market_rule_version: str = "intraday-regime-v1"
 
     phase4_score_version: str = "phase4-score-v1"
     phase4_rule_version: str = "phase4-rule-v2"

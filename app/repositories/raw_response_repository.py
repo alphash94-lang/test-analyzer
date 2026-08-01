@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -29,7 +30,7 @@ class RawResponseRepository:
         provider: str,
         function_name: str,
         endpoint: str,
-        request_parameters: dict[str, object],
+        request_parameters: Mapping[str, object],
         response: ApiResponse[Any],
     ) -> ApiRawResponse | None:
         if response.raw_content is None or response.http_status is None:

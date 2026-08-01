@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any
 
@@ -20,6 +21,8 @@ from app.providers.base import ApiResponse
 from app.providers.dart_analysis import (
     DART_AUDIT_ENDPOINT,
     DART_AUDIT_FUNCTION,
+    DART_COMPANY_ENDPOINT,
+    DART_COMPANY_FUNCTION,
     DART_DISCLOSURE_ENDPOINT,
     DART_DISCLOSURE_FUNCTION,
     DART_DIVIDEND_ENDPOINT,
@@ -33,11 +36,36 @@ from app.repositories.disclosure_repository import DisclosureRepository
 from app.repositories.financial_repository import FinancialRepository
 from app.repositories.price_repository import PriceRepository
 from app.repositories.raw_response_repository import RawResponseRepository
+from app.repositories.stock_repository import StockRepository
 from app.services.account_mapping import map_xbrl_account
 from app.utils.dates import now_kst
 from app.utils.technical_indicators import calculate_technical_snapshot
 
 _REPORT_CODES = ("11011", "11012", "11013", "11014")
+
+
+def _incremental_report_codes(
+    business_year: int,
+    as_of_date: date,
+    *,
+    include_all_interims: bool,
+) -> tuple[str, ...]:
+    """Return only reports that could officially exist by the basis date."""
+    if business_year < as_of_date.year:
+        annual_due = date(business_year + 1, 3, 31)
+        return ("11011",) if as_of_date >= annual_due else ()
+    if business_year > as_of_date.year:
+        return ()
+    due: list[str] = []
+    if as_of_date >= date(business_year, 5, 15):
+        due.append("11013")
+    if as_of_date >= date(business_year, 8, 14):
+        due.append("11012")
+    if as_of_date >= date(business_year, 11, 14):
+        due.append("11014")
+    if include_all_interims:
+        return tuple(due)
+    return tuple(due[-1:])
 
 
 def _is_cash_dividend_decision(report_name: str) -> bool:
@@ -58,8 +86,18 @@ class StockAnalysisService:
         self._disclosures = DisclosureRepository()
         self._financials = FinancialRepository()
         self._prices = PriceRepository(self._quality)
+        self._stocks = StockRepository(self._quality)
         self._engine = create_db_engine(settings)
         self._sessions = create_session_factory(self._engine)
+
+    @asynccontextmanager
+    async def shared_session(self):
+        shared_session = getattr(self._provider, "shared_session", None)
+        if shared_session is None:
+            yield
+            return
+        async with shared_session():
+            yield
 
     async def refresh(
         self,
@@ -67,6 +105,150 @@ class StockAnalysisService:
         symbol: str,
         as_of_date: date,
         years: int = 5,
+        incremental: bool = False,
+    ) -> FinancialRefreshSummary:
+        shared_session = getattr(self._provider, "shared_session", None)
+        if shared_session is None:
+            return await self._refresh(
+                symbol=symbol,
+                as_of_date=as_of_date,
+                years=years,
+                incremental=incremental,
+            )
+        async with shared_session():
+            return await self._refresh(
+                symbol=symbol,
+                as_of_date=as_of_date,
+                years=years,
+                incremental=incremental,
+            )
+
+    async def refresh_recommendation_financials(
+        self,
+        *,
+        symbol: str,
+        as_of_date: date,
+    ) -> FinancialRefreshSummary:
+        """Collect only the latest comparable statement needed for ranking.
+
+        The full stock-detail refresh also collects three years of dividends,
+        audit opinions, company profile and multiple statement periods. Running
+        that workflow for a 100-stock screen is unnecessarily expensive.
+        """
+        shared_session = getattr(self._provider, "shared_session", None)
+        if shared_session is None:
+            return await self._refresh_recommendation_financials(
+                symbol=symbol,
+                as_of_date=as_of_date,
+            )
+        async with shared_session():
+            return await self._refresh_recommendation_financials(
+                symbol=symbol,
+                as_of_date=as_of_date,
+            )
+
+    async def _refresh_recommendation_financials(
+        self,
+        *,
+        symbol: str,
+        as_of_date: date,
+    ) -> FinancialRefreshSummary:
+        if as_of_date > now_kst().date():
+            raise ValueError("as_of_date must not be in the future")
+        started_at = now_kst()
+        with self._sessions() as session:
+            stock = self._financials.get_stock(session, symbol)
+            if stock is None:
+                return self._summary(
+                    state=DataState.MISSING,
+                    symbol=symbol,
+                    started_at=started_at,
+                    years=1,
+                    errors=("종목을 찾을 수 없습니다.",),
+                )
+            if not stock.dart_corp_code:
+                return self._summary(
+                    state=DataState.MISSING,
+                    symbol=symbol,
+                    started_at=started_at,
+                    years=1,
+                    errors=("OpenDART 고유번호가 매핑되지 않았습니다.",),
+                )
+            stock_id = stock.id
+            corp_code = stock.dart_corp_code
+
+        current_codes = _incremental_report_codes(
+            as_of_date.year,
+            as_of_date,
+            include_all_interims=False,
+        )
+        report_candidates = (
+            ((as_of_date.year, current_codes[-1]), (as_of_date.year - 1, "11011"))
+            if current_codes
+            else ((as_of_date.year - 1, "11011"),)
+        )
+        begin_date = date(report_candidates[-1][0], 1, 1)
+        periodic_state, disclosures_stored, errors = await self._collect_disclosures(
+            stock_id=stock_id,
+            corp_code=corp_code,
+            begin_date=begin_date,
+            end_date=as_of_date,
+            publication_type="A",
+            disclosure_type="PERIODIC",
+            predicate=lambda _: True,
+        )
+        with self._sessions() as session:
+            disclosure_map = self._disclosures.receipt_metadata(
+                session,
+                stock_id,
+                as_of_date=as_of_date,
+            )
+
+        statements_stored = 0
+        accounts_stored = 0
+        scope = FinancialScope.UNKNOWN
+        for business_year, report_code in report_candidates:
+            statements, accounts, used_scope, financial_error = (
+                await self._collect_financial_report(
+                    stock_id=stock_id,
+                    corp_code=corp_code,
+                    business_year=business_year,
+                    report_code=report_code,
+                    disclosures=disclosure_map,
+                )
+            )
+            if financial_error is not None:
+                errors.append(financial_error)
+            if statements:
+                statements_stored = statements
+                accounts_stored = accounts
+                scope = used_scope or FinancialScope.UNKNOWN
+                break
+        state = (
+            DataState.AVAILABLE
+            if statements_stored
+            else periodic_state
+            if periodic_state != DataState.AVAILABLE
+            else DataState.MISSING
+        )
+        return self._summary(
+            state=state,
+            symbol=symbol,
+            started_at=started_at,
+            years=1,
+            disclosures_stored=disclosures_stored,
+            statements_stored=statements_stored,
+            accounts_stored=accounts_stored,
+            scope=scope,
+            errors=tuple(errors),
+        )
+    async def _refresh(
+        self,
+        *,
+        symbol: str,
+        as_of_date: date,
+        years: int,
+        incremental: bool,
     ) -> FinancialRefreshSummary:
         if years < 1 or years > 5:
             raise ValueError("years must be between 1 and 5")
@@ -95,6 +277,44 @@ class StockAnalysisService:
         begin_date = date(as_of_date.year - years - 1, 1, 1)
         disclosures_stored = 0
         errors: list[str] = []
+        company_response = await self._provider.fetch_company_profile(
+            corp_code=corp_code,
+        )
+        company_raw_id = self._save_raw(
+            response=company_response,
+            function_name=DART_COMPANY_FUNCTION,
+            endpoint=DART_COMPANY_ENDPOINT,
+            request_parameters={"corp_code": corp_code},
+        )
+        if (
+            company_response.state == DataState.AVAILABLE
+            and company_response.payload is not None
+        ):
+            with self._sessions.begin() as session:
+                stock = session.get(Stock, stock_id)
+                if stock is not None:
+                    self._stocks.upsert_dart_industry(
+                        session,
+                        stock=stock,
+                        industry_code=company_response.payload.industry_code,
+                        as_of_at=(
+                            company_response.metadata.as_of_at
+                            or company_response.metadata.collected_at
+                        ),
+                        collected_at=company_response.metadata.collected_at,
+                    )
+                    self._set_normalization_success(
+                        session,
+                        raw_response_id=company_raw_id,
+                    )
+        elif company_response.state not in {
+            DataState.MISSING,
+            DataState.NOT_CONFIGURED,
+        }:
+            errors.append(
+                company_response.error_message
+                or "OpenDART 기업개황 수집 실패"
+            )
         periodic_state, stored, page_errors = await self._collect_disclosures(
             stock_id=stock_id,
             corp_code=corp_code,
@@ -159,22 +379,39 @@ class StockAnalysisService:
             annual_first_year,
             as_of_date.year + 1,
         ):
-            audit_response = await self._provider.fetch_audit_opinions(
-                corp_code=corp_code,
-                business_year=business_year,
+            collect_annual = (
+                not incremental
+                or "11011"
+                in _incremental_report_codes(
+                    business_year,
+                    as_of_date,
+                    include_all_interims=False,
+                )
             )
-            audit_raw_id = self._save_raw(
-                response=audit_response,
-                function_name=DART_AUDIT_FUNCTION,
-                endpoint=DART_AUDIT_ENDPOINT,
-                request_parameters={
-                    "corp_code": corp_code,
-                    "bsns_year": str(business_year),
-                    "reprt_code": "11011",
-                },
+            audit_response = (
+                await self._provider.fetch_audit_opinions(
+                    corp_code=corp_code,
+                    business_year=business_year,
+                )
+                if collect_annual
+                else None
             )
+            if audit_response is not None:
+                audit_raw_id = self._save_raw(
+                    response=audit_response,
+                    function_name=DART_AUDIT_FUNCTION,
+                    endpoint=DART_AUDIT_ENDPOINT,
+                    request_parameters={
+                        "corp_code": corp_code,
+                        "bsns_year": str(business_year),
+                        "reprt_code": "11011",
+                    },
+                )
+            else:
+                audit_raw_id = None
             if (
-                audit_response.state == DataState.AVAILABLE
+                audit_response is not None
+                and audit_response.state == DataState.AVAILABLE
                 and audit_response.payload is not None
             ):
                 missing_receipts = self._missing_disclosure_receipts(
@@ -215,7 +452,7 @@ class StockAnalysisService:
                                 error_code="MISSING_STOCK",
                                 error_message="종목 레코드가 없습니다.",
                             )
-            elif audit_response.state not in {
+            elif audit_response is not None and audit_response.state not in {
                 DataState.MISSING,
                 DataState.NOT_CONFIGURED,
             }:
@@ -224,80 +461,42 @@ class StockAnalysisService:
                     or f"{business_year} 감사정보 수집 실패"
                 )
 
-            dividend_response = await self._provider.fetch_dividends(
-                corp_code=corp_code,
-                business_year=business_year,
-            )
-            raw_id = self._save_raw(
-                response=dividend_response,
-                function_name=DART_DIVIDEND_FUNCTION,
-                endpoint=DART_DIVIDEND_ENDPOINT,
-                request_parameters={
-                    "corp_code": corp_code,
-                    "bsns_year": str(business_year),
-                    "reprt_code": "11011",
-                },
-            )
-            if (
-                dividend_response.state == DataState.AVAILABLE
-                and dividend_response.payload is not None
-            ):
-                missing_receipts = self._missing_disclosure_receipts(
-                    dividend_response.payload,
-                    disclosure_map,
+            dividend_report_codes = (
+                _REPORT_CODES
+                if not incremental
+                else _incremental_report_codes(
+                    business_year,
+                    as_of_date,
+                    include_all_interims=True,
                 )
-                if missing_receipts:
-                    self._reject_missing_filing_dates(
-                        raw_response_id=raw_id,
-                        entity_type="dividend",
-                        receipt_numbers=missing_receipts,
+            )
+            for dividend_report_code in dividend_report_codes:
+                fact_count, dividend_count, dividend_error = (
+                    await self._collect_dividend_report(
+                        stock_id=stock_id,
+                        corp_code=corp_code,
+                        business_year=business_year,
+                        report_code=dividend_report_code,
+                        disclosures=disclosure_map,
                     )
-                    errors.append(
-                        "배당 접수번호의 공시 제출일을 확인할 수 없어 "
-                        "정규화 저장을 중단했습니다."
-                    )
-                else:
-                    with self._sessions.begin() as session:
-                        stock = session.get(Stock, stock_id)
-                        if stock is not None:
-                            fact_count, dividend_count = (
-                                self._financials.upsert_dividends(
-                                    session,
-                                    stock=stock,
-                                    business_year=business_year,
-                                    records=dividend_response.payload,
-                                    disclosures=disclosure_map,
-                                    raw_response_id=raw_id,
-                                    collected_at=(
-                                        dividend_response.metadata.collected_at
-                                    ),
-                                )
-                            )
-                            dividend_facts_stored += fact_count
-                            dividends_stored += dividend_count
-                            self._set_normalization_success(
-                                session,
-                                raw_response_id=raw_id,
-                            )
-                        else:
-                            self._set_normalization_failure(
-                                session,
-                                raw_response_id=raw_id,
-                                error_code="MISSING_STOCK",
-                                error_message="종목 레코드가 없습니다.",
-                            )
-            elif dividend_response.state not in {
-                DataState.MISSING,
-                DataState.NOT_CONFIGURED,
-            }:
-                errors.append(
-                    dividend_response.error_message
-                    or f"{business_year} 배당정보 수집 실패"
                 )
+                dividend_facts_stored += fact_count
+                dividends_stored += dividend_count
+                if dividend_error is not None:
+                    errors.append(dividend_error)
 
             if business_year < financial_first_year:
                 continue
-            for report_code in _REPORT_CODES:
+            financial_report_codes = (
+                _REPORT_CODES
+                if not incremental
+                else _incremental_report_codes(
+                    business_year,
+                    as_of_date,
+                    include_all_interims=False,
+                )
+            )
+            for report_code in financial_report_codes:
                 (
                     statement_count,
                     account_count,
@@ -359,6 +558,11 @@ class StockAnalysisService:
                 session,
                 stock.id,
             )
+            financial_history = self._financials.annual_mapped_account_history(
+                session,
+                stock.id,
+                limit_years=3,
+            )
             dividends = self._financials.dividend_history(
                 session,
                 stock.id,
@@ -373,6 +577,7 @@ class StockAnalysisService:
             symbol=symbol,
             financial_scope=scope,
             financial_accounts=accounts,
+            financial_history=financial_history,
             dividends=dividends,
             latest_audit=latest_audit,
             dividend_decisions=decisions,
@@ -563,6 +768,83 @@ class StockAnalysisService:
             raw_response_id,
             success=True,
         )
+
+    async def _collect_dividend_report(
+        self,
+        *,
+        stock_id: int,
+        corp_code: str,
+        business_year: int,
+        report_code: str,
+        disclosures: dict[str, Disclosure],
+    ) -> tuple[int, int, str | None]:
+        response = await self._provider.fetch_dividends(
+            corp_code=corp_code,
+            business_year=business_year,
+            report_code=report_code,
+        )
+        raw_id = self._save_raw(
+            response=response,
+            function_name=DART_DIVIDEND_FUNCTION,
+            endpoint=DART_DIVIDEND_ENDPOINT,
+            request_parameters={
+                "corp_code": corp_code,
+                "bsns_year": str(business_year),
+                "reprt_code": report_code,
+            },
+        )
+        if response.state in {DataState.MISSING, DataState.NOT_CONFIGURED}:
+            return 0, 0, None
+        if response.state != DataState.AVAILABLE or response.payload is None:
+            return (
+                0,
+                0,
+                response.error_message
+                or f"{business_year} {report_code} 배당정보 수집 실패",
+            )
+        missing_receipts = self._missing_disclosure_receipts(
+            response.payload,
+            disclosures,
+        )
+        if missing_receipts:
+            self._reject_missing_filing_dates(
+                raw_response_id=raw_id,
+                entity_type="dividend",
+                receipt_numbers=missing_receipts,
+            )
+            return (
+                0,
+                0,
+                (
+                    "배당 접수번호의 공시 제출일을 확인할 수 없어 "
+                    "정규화 저장을 중단했습니다."
+                ),
+            )
+        with self._sessions.begin() as session:
+            stock = session.get(Stock, stock_id)
+            if stock is None:
+                self._set_normalization_failure(
+                    session,
+                    raw_response_id=raw_id,
+                    error_code="MISSING_STOCK",
+                    error_message="종목 레코드가 없습니다.",
+                )
+                return 0, 0, "종목 레코드가 없습니다."
+            counts = self._financials.upsert_dividends(
+                session,
+                stock=stock,
+                business_year=business_year,
+                report_code=report_code,
+                records=response.payload,
+                disclosures=disclosures,
+                raw_response_id=raw_id,
+                collected_at=response.metadata.collected_at,
+            )
+            self._set_normalization_success(
+                session,
+                raw_response_id=raw_id,
+            )
+        return counts[0], counts[1], None
 
     async def _collect_financial_report(
         self,

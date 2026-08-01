@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +24,13 @@ from app.models.metadata import (
     DataState,
     DataTiming,
     FinancialScope,
+)
+from app.models.price import (
+    KisAdjustedDailyPriceItem,
+    KisCurrentValuationItem,
+    KisEstimatePerformanceRow,
+    KisEstimatePeriodItem,
+    KisForwardValuationItem,
 )
 from app.models.status import ConnectionState, ConnectionStatusItem
 from app.providers.base import ApiResponse
@@ -44,12 +53,28 @@ KIS_PROGRAM_ENDPOINT = (
 KIS_SHORT_ENDPOINT = (
     f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/daily-short-sale"
 )
+KIS_ADJUSTED_PRICE_ENDPOINT = (
+    f"{KIS_BASE_URL}"
+    "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+)
+KIS_CURRENT_VALUATION_ENDPOINT = (
+    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
+)
+KIS_ESTIMATE_PERFORMANCE_ENDPOINT = (
+    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/estimate-perform"
+)
 KIS_OPINION_FUNCTION = "국내주식 종목투자의견"
 KIS_FLOW_FUNCTION = "종목별 투자자매매동향(일별)"
 KIS_PROGRAM_FUNCTION = "프로그램매매 종합현황(일별)"
 KIS_SHORT_FUNCTION = "국내주식 공매도 일별추이"
+KIS_ADJUSTED_PRICE_FUNCTION = "국내주식기간별시세(수정주가)"
+KIS_CURRENT_VALUATION_FUNCTION = "주식현재가 시세(PER·PBR)"
+KIS_ESTIMATE_PERFORMANCE_FUNCTION = "국내주식 종목추정실적"
 
-_SYMBOL = re.compile(r"^\d{6}$")
+_SYMBOL = re.compile(r"^[0-9A-Z]{6}$")
+_ESTIMATE_EPS_ROW_INDEX = 1
+_ESTIMATE_PER_ROW_INDEX = 3
+_ESTIMATE_VALUE_SCALE = Decimal(10)
 
 
 class KisReferenceProvider:
@@ -64,6 +89,7 @@ class KisReferenceProvider:
             settings.phase5_kis_requests_per_second
         )
         self._access_token: str | None = None
+        self._token_expires_at: datetime | None = None
 
     @property
     def name(self) -> str:
@@ -188,6 +214,166 @@ class KisReferenceProvider:
             ),
         )
 
+    async def fetch_adjusted_daily_prices(
+        self,
+        *,
+        symbol: str,
+        begin_date: date,
+        end_date: date,
+    ) -> ApiResponse[list[KisAdjustedDailyPriceItem]]:
+        self._validate_request(symbol, begin_date, end_date)
+        return await self._fetch_list(
+            endpoint=KIS_ADJUSTED_PRICE_ENDPOINT,
+            function_name=KIS_ADJUSTED_PRICE_FUNCTION,
+            tr_id="FHKST03010100",
+            parameters={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_DATE_1": begin_date.strftime("%Y%m%d"),
+                "FID_INPUT_DATE_2": end_date.strftime("%Y%m%d"),
+                "FID_PERIOD_DIV_CODE": "D",
+                "FID_ORG_ADJ_PRC": "0",
+            },
+            output_field="output2",
+            item_model=KisAdjustedDailyPriceItem,
+            response_validator=lambda rows: all(
+                begin_date <= row.trade_date <= end_date for row in rows
+            ),
+        )
+
+    async def fetch_current_valuation(
+        self,
+        *,
+        symbol: str,
+    ) -> ApiResponse[list[KisCurrentValuationItem]]:
+        self._validate_request(symbol, date.min, date.min)
+        return await self._fetch_list(
+            endpoint=KIS_CURRENT_VALUATION_ENDPOINT,
+            function_name=KIS_CURRENT_VALUATION_FUNCTION,
+            tr_id="FHKST01010100",
+            parameters={
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+            },
+            output_field="output",
+            item_model=KisCurrentValuationItem,
+            response_validator=lambda rows: len(rows) == 1,
+        )
+
+    async def fetch_forward_valuation(
+        self,
+        *,
+        symbol: str,
+        as_of_date: date,
+    ) -> ApiResponse[KisForwardValuationItem]:
+        self._validate_request(symbol, as_of_date, as_of_date)
+        common = {
+            "endpoint": KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+            "function_name": KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+            "tr_id": "HHKST668300C0",
+            "parameters": {"SHT_CD": symbol},
+        }
+        performance = await self._fetch_list(
+            **common,
+            output_field="output3",
+            item_model=KisEstimatePerformanceRow,
+            response_validator=lambda rows: len(rows) >= 4,
+        )
+        periods = await self._fetch_list(
+            **common,
+            output_field="output4",
+            item_model=KisEstimatePeriodItem,
+            response_validator=lambda rows: 1 <= len(rows) <= 5,
+        )
+        collected_at = now_kst()
+        for response in (performance, periods):
+            if response.state != DataState.AVAILABLE:
+                return ApiResponse(
+                    state=response.state,
+                    metadata=self._metadata(
+                        KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+                        KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+                        response.state,
+                        collected_at,
+                    ),
+                    http_status=response.http_status,
+                    response_hash=response.response_hash,
+                    content_type=response.content_type,
+                    raw_content=response.raw_content,
+                    error_code=response.error_code,
+                    error_message=response.error_message,
+                )
+        assert performance.payload is not None
+        assert periods.payload is not None
+        candidates = [
+            (index, item.fiscal_period)
+            for index, item in enumerate(periods.payload)
+            if item.fiscal_period.upper().endswith("E")
+            and int(item.fiscal_period[:4]) >= as_of_date.year
+        ]
+        if not candidates:
+            return ApiResponse(
+                state=DataState.MISSING,
+                metadata=self._metadata(
+                    KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+                    KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+                    DataState.MISSING,
+                    collected_at,
+                ),
+                error_code="NO_FORWARD_PERIOD",
+                error_message="KIS returned no future estimate period",
+            )
+        period_index, fiscal_period = min(
+            candidates,
+            key=lambda item: (int(item[1][:4]), item[0]),
+        )
+        eps_raw = performance.payload[_ESTIMATE_EPS_ROW_INDEX].values[
+            period_index
+        ]
+        per_raw = performance.payload[_ESTIMATE_PER_ROW_INDEX].values[
+            period_index
+        ]
+        if eps_raw is None or per_raw is None:
+            return ApiResponse(
+                state=DataState.MISSING,
+                metadata=self._metadata(
+                    KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+                    KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+                    DataState.MISSING,
+                    collected_at,
+                ),
+                error_code="NO_FORWARD_VALUATION",
+                error_message="KIS returned no forward EPS or PER",
+            )
+        try:
+            item = KisForwardValuationItem(
+                fiscal_period=fiscal_period,
+                forward_eps=eps_raw / _ESTIMATE_VALUE_SCALE,
+                forward_per=per_raw / _ESTIMATE_VALUE_SCALE,
+            )
+        except ValidationError as exc:
+            return self._failed(
+                KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+                KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+                collected_at,
+                "SCHEMA_VALIDATION_FAILED",
+                f"KIS forward valuation validation failed: {type(exc).__name__}",
+            )
+        return ApiResponse(
+            state=DataState.AVAILABLE,
+            metadata=self._metadata(
+                KIS_ESTIMATE_PERFORMANCE_FUNCTION,
+                KIS_ESTIMATE_PERFORMANCE_ENDPOINT,
+                DataState.AVAILABLE,
+                collected_at,
+            ),
+            payload=item,
+            http_status=performance.http_status,
+            response_hash=performance.response_hash,
+            content_type=performance.content_type,
+            raw_content=performance.raw_content,
+        )
+
     async def _fetch_list[ItemT: BaseModel](
         self,
         *,
@@ -253,6 +439,43 @@ class KisReferenceProvider:
                 },
                 params=parameters,
             )
+            if self._is_expired_token_response(response):
+                self._invalidate_token()
+                token, token_error = await self._token(
+                    client,
+                    app_key=app_key,
+                    app_secret=app_secret,
+                )
+                if token is None:
+                    return ApiResponse(
+                        state=DataState.FETCH_FAILED,
+                        metadata=self._metadata(
+                            function_name,
+                            endpoint,
+                            DataState.FETCH_FAILED,
+                            collected_at,
+                        ),
+                        error_code="TOKEN_REFRESH_FAILED",
+                        error_message=(
+                            token_error or "KIS token refresh failed"
+                        ),
+                    )
+                response = await request_with_retry(
+                    client,
+                    self._limiter,
+                    "GET",
+                    endpoint,
+                    retries=self._settings.http_retries,
+                    backoff_seconds=self._settings.http_backoff_seconds,
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "appkey": app_key,
+                        "appsecret": app_secret,
+                        "tr_id": tr_id,
+                        "custtype": "P",
+                    },
+                    params=parameters,
+                )
         except httpx.TransportError as exc:
             return ApiResponse(
                 state=DataState.FETCH_FAILED,
@@ -375,7 +598,15 @@ class KisReferenceProvider:
         app_key: str,
         app_secret: str,
     ) -> tuple[str | None, str | None]:
-        if self._access_token:
+        if (
+            self._access_token
+            and self._token_expires_at is not None
+            and now_kst() < self._token_expires_at
+        ):
+            return self._access_token, None
+        cached = self._load_cached_token(app_key, app_secret)
+        if cached is not None:
+            self._access_token, self._token_expires_at = cached
             return self._access_token, None
         try:
             response = await request_with_retry(
@@ -410,8 +641,103 @@ class KisReferenceProvider:
                 raise ValueError
         except (json.JSONDecodeError, TypeError, ValueError):
             return None, "KIS token response schema validation failed"
+        expires_in = int(body.get("expires_in", 86400))
+        expires_at = now_kst() + timedelta(seconds=max(60, expires_in - 300))
         self._access_token = token
+        self._token_expires_at = expires_at
+        self._save_cached_token(
+            app_key,
+            app_secret,
+            token=token,
+            expires_at=expires_at,
+        )
         return token, None
+
+    @staticmethod
+    def _is_expired_token_response(response: httpx.Response) -> bool:
+        try:
+            body = json.loads(response.content)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return (
+            isinstance(body, dict)
+            and str(body.get("msg_cd", "")).strip() == "EGW00123"
+        )
+
+    def _invalidate_token(self) -> None:
+        self._access_token = None
+        self._token_expires_at = None
+        if self._client is not None:
+            return
+        try:
+            self._token_cache_path().unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return
+
+    def _token_cache_path(self) -> Path:
+        return self._settings.raw_data_dir.parent / ".kis_token_cache.json"
+
+    def _credential_fingerprint(self, app_key: str, app_secret: str) -> str:
+        return sha256(f"{app_key}\0{app_secret}".encode()).hexdigest()
+
+    def _load_cached_token(
+        self,
+        app_key: str,
+        app_secret: str,
+    ) -> tuple[str, datetime] | None:
+        if self._client is not None:
+            return None
+        path = self._token_cache_path()
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+            token = str(body["access_token"]).strip()
+            expires_at = datetime.fromisoformat(str(body["expires_at"]))
+            fingerprint = str(body["credential_fingerprint"])
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if (
+            not token
+            or expires_at.tzinfo is None
+            or now_kst() >= expires_at
+            or fingerprint != self._credential_fingerprint(app_key, app_secret)
+        ):
+            return None
+        return token, expires_at
+
+    def _save_cached_token(
+        self,
+        app_key: str,
+        app_secret: str,
+        *,
+        token: str,
+        expires_at: datetime,
+    ) -> None:
+        if self._client is not None:
+            return
+        path = self._token_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "access_token": token,
+                        "expires_at": expires_at.isoformat(),
+                        "credential_fingerprint": self._credential_fingerprint(
+                            app_key,
+                            app_secret,
+                        ),
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        except OSError:
+            # A cache failure must not invalidate an otherwise valid API token.
+            return
 
     def _credentials(self) -> tuple[str, str] | None:
         app_key = (
@@ -433,7 +759,9 @@ class KisReferenceProvider:
         end_date: date,
     ) -> None:
         if not _SYMBOL.fullmatch(symbol):
-            raise ValueError("KIS symbol must be six digits")
+            raise ValueError(
+                "KIS symbol must be six uppercase alphanumeric characters"
+            )
         if begin_date > end_date:
             raise ValueError("begin_date must not be after end_date")
 
@@ -489,6 +817,7 @@ class KisReferenceProvider:
             collected_at=collected_at,
             timing=DataTiming.DELAYED,
             financial_scope=FinancialScope.NOT_APPLICABLE,
-            is_estimate=function_name == KIS_OPINION_FUNCTION,
+            is_estimate=function_name
+            in {KIS_OPINION_FUNCTION, KIS_ESTIMATE_PERFORMANCE_FUNCTION},
             source_url=HttpUrl(endpoint),
         )

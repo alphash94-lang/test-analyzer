@@ -332,6 +332,59 @@ def test_kis_opinion_provider_uses_verified_fields_and_never_assumes_currency() 
     assert len(requests) == 2
 
 
+def test_kis_adjusted_daily_price_uses_official_adjustment_parameter() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/tokenP":
+            return httpx.Response(
+                200,
+                json={"access_token": "token", "expires_in": 86400},
+            )
+        assert request.url.path.endswith("/inquire-daily-itemchartprice")
+        assert request.headers["tr_id"] == "FHKST03010100"
+        assert request.url.params["FID_PERIOD_DIV_CODE"] == "D"
+        assert request.url.params["FID_ORG_ADJ_PRC"] == "0"
+        return httpx.Response(
+            200,
+            json={
+                "rt_cd": "0",
+                "msg_cd": "MCA00000",
+                "msg1": "정상처리 되었습니다.",
+                "output2": [
+                    {
+                        "stck_bsop_date": "20260729",
+                        "stck_clpr": "70000",
+                        "stck_oprc": "69000",
+                        "stck_hgpr": "71000",
+                        "stck_lwpr": "68000",
+                        "acml_vol": "123456",
+                        "acml_tr_pbmn": "8641920000",
+                        "mod_yn": "N",
+                        "revl_issu_reas": "",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = KisReferenceProvider(
+        make_settings(kis_app_key="app-key", kis_app_secret="app-secret"),
+        client,
+    )
+    response = asyncio.run(
+        provider.fetch_adjusted_daily_prices(
+            symbol="005930",
+            begin_date=date(2026, 7, 1),
+            end_date=date(2026, 7, 29),
+        )
+    )
+    asyncio.run(client.aclose())
+
+    assert response.state == DataState.AVAILABLE
+    assert response.payload is not None
+    assert response.payload[0].trade_date == date(2026, 7, 29)
+    assert response.payload[0].close_price == Decimal(70000)
+
+
 def test_kis_provider_rejects_an_uncollected_continuation_page() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/oauth2/tokenP":
