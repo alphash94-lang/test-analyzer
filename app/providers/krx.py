@@ -15,7 +15,18 @@ from app.utils.dates import SEOUL, now_kst
 from app.utils.http import AsyncRateLimiter, request_with_retry
 
 KRX_STOCK_MASTER_ENDPOINT = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_isu_base_info"
+KRX_KOSDAQ_STOCK_MASTER_ENDPOINT = (
+    "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_isu_base_info"
+)
 KRX_STOCK_MASTER_FUNCTION = "유가증권 종목기본정보"
+KRX_KOSDAQ_STOCK_MASTER_FUNCTION = "코스닥 종목기본정보"
+_MARKET_CONTRACTS = {
+    "KOSPI": (KRX_STOCK_MASTER_ENDPOINT, KRX_STOCK_MASTER_FUNCTION),
+    "KOSDAQ": (
+        KRX_KOSDAQ_STOCK_MASTER_ENDPOINT,
+        KRX_KOSDAQ_STOCK_MASTER_FUNCTION,
+    ),
+}
 
 
 class KrxProvider(BaseProvider[list[KrxStockMasterItem]]):
@@ -23,9 +34,18 @@ class KrxProvider(BaseProvider[list[KrxStockMasterItem]]):
         self,
         settings: Settings,
         client: httpx.AsyncClient | None = None,
+        *,
+        market: str = "KOSPI",
     ) -> None:
+        normalized_market = market.strip().upper()
+        if normalized_market not in _MARKET_CONTRACTS:
+            raise ValueError("market must be KOSPI or KOSDAQ")
         self._settings = settings
         self._client = client
+        self._market = normalized_market
+        self._endpoint, self._function_name = _MARKET_CONTRACTS[
+            normalized_market
+        ]
         self._limiter = AsyncRateLimiter(settings.krx_requests_per_second)
 
     @property
@@ -83,7 +103,7 @@ class KrxProvider(BaseProvider[list[KrxStockMasterItem]]):
                 client,
                 self._limiter,
                 "GET",
-                KRX_STOCK_MASTER_ENDPOINT,
+                self._endpoint,
                 retries=self._settings.http_retries,
                 backoff_seconds=self._settings.http_backoff_seconds,
                 headers={"AUTH_KEY": key},
@@ -176,12 +196,12 @@ class KrxProvider(BaseProvider[list[KrxStockMasterItem]]):
     ) -> DataMetadata:
         return DataMetadata(
             provider=self.name,
-            function_name=KRX_STOCK_MASTER_FUNCTION,
+            function_name=self._function_name,
             state=state,
             as_of_at=datetime.combine(requested_date, time.min, tzinfo=SEOUL),
             collected_at=collected_at,
             timing=DataTiming.NOT_APPLICABLE,
-            source_url=HttpUrl(KRX_STOCK_MASTER_ENDPOINT),
+            source_url=HttpUrl(self._endpoint),
         )
 
     def _unavailable(

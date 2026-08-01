@@ -18,6 +18,8 @@ class AdjustedPricePoint:
     is_adjusted: bool | None
     adjustment_status: str | None
     source_provider: str | None = None
+    open: Decimal | None = None
+    volume: Decimal | None = None
 
 
 def _mean(values: list[Decimal]) -> Decimal:

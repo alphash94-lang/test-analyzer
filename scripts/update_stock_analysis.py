@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", required=True, type=_parse_symbol)
     parser.add_argument("--as-of", required=True, type=_parse_date)
     parser.add_argument("--years", type=int, choices=range(1, 6), default=5)
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Fetch only filed annual reports and the latest available interim period.",
+    )
     return parser
 
 
@@ -51,6 +56,7 @@ async def _run(args: argparse.Namespace) -> int:
             symbol=args.symbol,
             as_of_date=args.as_of,
             years=args.years,
+            incremental=args.incremental,
         )
     finally:
         service.close()

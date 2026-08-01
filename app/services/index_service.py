@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.session import create_db_engine, create_session_factory
-from app.models.market_analysis import IndexRefreshSummary
+from app.models.market_analysis import IndexPoint, IndexRefreshSummary
 from app.models.metadata import DataState
 from app.providers.base import ApiResponse
 from app.providers.krx_index import (
@@ -77,6 +77,24 @@ class IndexService:
             stored=stored,
             errors=errors,
         )
+
+    def history(
+        self,
+        *,
+        index_name: str = "코스피",
+        limit: int = 100,
+    ) -> list[IndexPoint]:
+        if limit < 1:
+            raise ValueError("history limit must be positive")
+        as_of_at = now_kst()
+        with self._sessions() as session:
+            return self._indexes.history(
+                session,
+                index_name,
+                as_of_date=as_of_at.date(),
+                as_of_at=as_of_at,
+                limit=limit,
+            )
 
     def close(self) -> None:
         self._engine.dispose()

@@ -5,6 +5,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp*/
 .coverage
 htmlcov/
 .mypy_cache/
@@ -15,6 +16,11 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/raw/
+data/backups/
+data/logs/
+data/.kis_token_cache.json
+data/realtime_market_snapshot*.json
+data/realtime_market_snapshot*.pid
 dist/
 build/
 *.egg-info/

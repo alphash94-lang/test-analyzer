@@ -1,5 +1,9 @@
 # KOSPI Dividend & Semiconductor Rotation Analyzer
 
+종합 저평가 기능을 단계적으로 확장할 때 사용할 구현·검수 명령문은
+[종합 저평가 분석 단계별 Codex 프롬프트](docs/COMPREHENSIVE_UNDERVALUE_CODEX_PROMPTS.md)에
+정리되어 있다.
+
 한국어 표시명은 **코스피 배당주 저평가·시장회복 분석기**다.
 
 현재 구현 범위는 Phase 7 통합 검증과 배포 준비다. 기존 종목·가격·OpenDART 재무·배당·감사와
@@ -17,14 +21,14 @@ Phase 7은 새 투자 기능을 추가하지 않고 보안, 최신성 경고, �
 
 ## 요구 환경
 
-- Python 3.12
+- Python 3.14
 - Windows PowerShell 기준 명령
 - SQLite 기본 사용
 - PostgreSQL은 `DATABASE_URL`을 변경해 사용
 
 ## 초보자 빠른 시작
 
-1. Python 3.12를 설치하고 이 디렉터리에서 PowerShell을 연다.
+1. Python 3.14를 설치하고 이 디렉터리에서 PowerShell을 연다.
 2. 아래 **설치** 명령으로 가상환경과 의존성을 준비한다.
 3. `example`을 `.env`로 복사한다. API 키가 없으면 값은 비워 둔다.
 4. `python -m alembic upgrade head`로 DB를 만든다.
@@ -43,7 +47,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-시스템에 Python 3.12가 PATH로 등록되지 않았다면 설치된 Python 3.12 실행 파일의 전체 경로를 사용한다.
+시스템에 Python 3.14가 PATH로 등록되지 않았다면 설치된 Python 3.14 실행 파일의 전체 경로를 사용한다.
 
 ## 환경변수
 
@@ -147,6 +151,24 @@ Windows 작업 스케줄러의 `KOSPI Analyzer - Daily Update` 작업은 평일
 당일 날짜를 `--as-of`로 전달하며 결과 로그를
 `data/logs/update_all_YYYY-MM-DD.log`에 저장한다. 놓친 실행은 다음 로그인
 또는 시스템 사용 가능 시점에 시작하며, 이미 실행 중이면 중복 실행하지 않는다.
+수집 전에 SQLite DB와 API 원응답을 자동 백업한다. 백업이 실패하면 데이터
+수집을 시작하지 않는다.
+
+실패 알림은 Slack 호환 Webhook을 사용한다. `.env`와 GitHub 저장소 Secret에
+동일한 이름으로 등록한다. 미설정 상태에서도 작업은 실행되며 실패는 로그와
+GitHub Actions 상태에 남는다.
+
+```dotenv
+UPDATE_FAILURE_WEBHOOK_URL=https://hooks.slack.com/services/...
+```
+
+### GitHub Actions CI
+
+`.github/workflows/ci.yml`은 pull request와 `main` push마다 Python 3.14에서
+의존성 검사, 소스 컴파일, Ruff, Pyright, Alembic 마이그레이션 검증과 전체
+pytest를 실행한다. CI 실패 알림을 받으려면 저장소
+**Settings > Secrets and variables > Actions**에
+`UPDATE_FAILURE_WEBHOOK_URL` Secret을 등록한다.
 
 ## Phase 1B KRX 일별가격 갱신
 
@@ -421,28 +443,36 @@ OpenDART 중요공시는 마지막 저장 접수일과 설정된 lookback을 기
 
 ## 백업과 복구
 
-SQLite는 쓰기 작업과 Streamlit을 중지한 상태에서 DB와 원자료를 함께
-백업한다.
+SQLite 온라인 백업 API로 일관된 DB 복사본을 만들고 API 원응답을 ZIP으로
+압축한다. 각 파일의 SHA-256과 크기는 `manifest.json`에 기록한다. 기본
+보관 위치는 `data/backups`, 기본 보존기간은 30일이다.
 
 ```powershell
-New-Item -ItemType Directory -Force backup | Out-Null
-Copy-Item data\kospi_analyzer.db backup\kospi_analyzer.db
-Copy-Item data\raw backup\raw -Recurse
+.\.venv\Scripts\python.exe -m scripts.backup_data
+```
+
+보존기간과 백업 라벨을 지정할 수 있다.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.backup_data `
+  --retention-days 30 `
+  --label manual
 ```
 
 복구 전 현재 파일을 별도 보관하고, 백업 DB를 새 경로에 복사해 먼저
 검증한다.
 
 ```powershell
-Copy-Item backup\kospi_analyzer.db data\restored.db
+Copy-Item data\backups\<백업폴더>\database.sqlite3 data\restored.db
 $env:DATABASE_URL = "sqlite:///./data/restored.db"
 .\.venv\Scripts\python.exe -m alembic current
 .\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
 `alembic current`와 앱 초기화가 성공한 뒤에만 운영 `DATABASE_URL`을 복구
-DB로 바꾼다. 원자료 `data/raw`도 같은 시점 백업을 사용해야 응답 hash와
-DB 메타데이터가 일치한다.
+DB로 바꾼다. 같은 백업 폴더의 `raw_responses.zip`을 `data/raw`에 복원해야
+응답 hash와 DB 메타데이터가 일치한다. 복원 전에는 `manifest.json`의
+SHA-256과 실제 파일 해시를 비교한다.
 
 PostgreSQL은 운영 서버의 `pg_dump --format=custom`과 `pg_restore`를 사용한다.
 접속 문자열과 비밀번호는 명령 기록, 문서, 로그에 직접 넣지 말고 운영 비밀

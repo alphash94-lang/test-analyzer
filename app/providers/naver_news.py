@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime
 from hashlib import sha256
 from typing import Any
@@ -36,6 +37,22 @@ class NaverNewsProvider:
         self._limiter = AsyncRateLimiter(
             settings.phase5_naver_requests_per_second
         )
+
+    @asynccontextmanager
+    async def shared_session(self):
+        """Reuse one HTTP connection pool for a multi-stock refresh."""
+        if self._client is not None:
+            yield
+            return
+        async with httpx.AsyncClient(
+            timeout=self._settings.http_timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            self._client = client
+            try:
+                yield
+            finally:
+                self._client = None
 
     @property
     def name(self) -> str:

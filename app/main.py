@@ -17,6 +17,8 @@ from app.ui.styles import apply_styles
 
 MENU_PHASES: dict[str, str] = {}
 API_PREVIEW_MENU = "통합 API 미리보기"
+STOCK_SEARCH_MENU = "개별 종목 검색"
+RECOMMENDATIONS_MENU = "추천종목"
 
 
 def main() -> None:
@@ -37,9 +39,9 @@ def main() -> None:
             "메뉴",
             [
                 "데이터 연결상태",
-                "개별 종목 검색",
+                STOCK_SEARCH_MENU,
                 "시장국면 대시보드",
-                "추천종목",
+                RECOMMENDATIONS_MENU,
                 "포트폴리오",
                 "공시·뉴스",
                 "백테스트",
@@ -48,17 +50,23 @@ def main() -> None:
                 "설정",
             ],
             label_visibility="collapsed",
+            key="main_menu",
         )
         st.divider()
         st.caption("읽기 전용 · 자동주문 기능 없음")
 
+    if selected != STOCK_SEARCH_MENU:
+        st.session_state.pop("stock_detail_origin", None)
+        st.session_state.pop("stock_detail_recommendation", None)
+        st.session_state.pop("stock_search_query", None)
+
     if selected == "데이터 연결상태":
         render_data_status(settings)
-    elif selected == "개별 종목 검색":
+    elif selected == STOCK_SEARCH_MENU:
         render_stock_search(settings)
     elif selected == "시장국면 대시보드":
         render_market_dashboard(settings)
-    elif selected == "추천종목":
+    elif selected == RECOMMENDATIONS_MENU:
         render_recommendations(settings)
     elif selected == "포트폴리오":
         render_portfolio(settings)

@@ -159,7 +159,7 @@ def _profile_form(profile: PortfolioProfile) -> PortfolioProfile | None:
         }
         submitted = st.form_submit_button(
             "포트폴리오 설정 저장",
-            use_container_width=True,
+            width="stretch",
         )
     if not submitted:
         return None
@@ -274,7 +274,7 @@ def render_portfolio(settings: Settings) -> None:
                 )
             st.dataframe(
                 position_rows,
-                use_container_width=True,
+                width="stretch",
             )
         st.caption(
             "RSI 하나만으로 전량매도를 지시하지 않습니다. "
@@ -315,7 +315,7 @@ def render_portfolio(settings: Settings) -> None:
                 )
             st.dataframe(
                 allocation_rows,
-                use_container_width=True,
+                width="stretch",
             )
     except (SQLAlchemyError, OSError, ValueError, ValidationError) as exc:
         st.error(

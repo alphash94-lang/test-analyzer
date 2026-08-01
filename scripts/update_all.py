@@ -115,13 +115,86 @@ def build_steps(
             arguments=("--as-of", as_of),
         ),
     ]
-    steps.extend(
-        UpdateStep(
-            name=f"events_{symbol}",
-            module="scripts.update_phase5_events",
-            arguments=("--symbol", symbol, "--as-of", as_of),
-        )
+    event_arguments = tuple(
+        argument
         for symbol in symbols
+        for argument in ("--symbol", symbol)
+    ) + ("--as-of", as_of)
+    for symbol in symbols:
+        steps.append(
+            UpdateStep(
+                name=f"adjusted_prices_{symbol}",
+                module="scripts.update_adjusted_prices",
+                arguments=(
+                    "--symbol",
+                    symbol,
+                    "--as-of",
+                    as_of,
+                ),
+            )
+        )
+        steps.append(
+            UpdateStep(
+                name=f"stock_analysis_{symbol}",
+                module="scripts.update_stock_analysis",
+                arguments=(
+                    "--symbol",
+                    symbol,
+                    "--as-of",
+                    as_of,
+                    "--years",
+                    "5",
+                ),
+            )
+        )
+    steps.append(
+        UpdateStep(
+            name="market_status",
+            module="scripts.update_market_status",
+            arguments=event_arguments,
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="events_watchlist",
+            module="scripts.update_phase5_watchlist",
+            arguments=event_arguments,
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="valuations",
+            module="scripts.update_valuations",
+            arguments=event_arguments,
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="phase3_inputs",
+            module="scripts.update_phase3_inputs",
+            arguments=("--as-of", as_of),
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="phase3_market",
+            module="scripts.update_phase3_market",
+            arguments=("--as-of", as_of),
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="market_screening_data",
+            module="scripts.update_market_screening_data",
+            arguments=("--as-of", as_of),
+        )
+    )
+    steps.append(
+        UpdateStep(
+            name="phase4_recommendations",
+            module="scripts.update_phase4_recommendations",
+            arguments=("--as-of", as_of),
+        )
     )
     steps.append(
         UpdateStep(

@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models.analysis import Recommendation
@@ -120,6 +120,9 @@ class RecommendationRepository:
                 .where(
                     Stock.is_active.is_(True),
                     Stock.is_kospi.is_(True),
+                    Stock.security_type == "STOCK",
+                    Stock.share_class == "COMMON",
+                    Stock.listing_status == "LISTED",
                     Stock.data_state == DataState.AVAILABLE.value,
                     Stock.collected_at <= as_of_at,
                 )
@@ -135,10 +138,39 @@ class RecommendationRepository:
         as_of_at: datetime,
         provider: str,
     ) -> PriceDaily | None:
-        return session.scalar(
-            select(PriceDaily)
+        return RecommendationRepository.verified_reference_prices(
+            session,
+            [stock_id],
+            as_of_at=as_of_at,
+            provider=provider,
+        ).get(stock_id)
+
+    @staticmethod
+    def verified_reference_prices(
+        session: Session,
+        stock_ids: list[int],
+        *,
+        as_of_at: datetime,
+        provider: str,
+    ) -> dict[int, PriceDaily]:
+        if not stock_ids:
+            return {}
+        ranked_ids = (
+            select(
+                PriceDaily.id.label("price_id"),
+                func.row_number()
+                .over(
+                    partition_by=PriceDaily.stock_id,
+                    order_by=(
+                        PriceDaily.trade_date.desc(),
+                        PriceDaily.collected_at.desc(),
+                        PriceDaily.id.desc(),
+                    ),
+                )
+                .label("rank"),
+            )
             .where(
-                PriceDaily.stock_id == stock_id,
+                PriceDaily.stock_id.in_(stock_ids),
                 PriceDaily.trade_date <= as_of_at.date(),
                 PriceDaily.collected_at <= as_of_at,
                 PriceDaily.source_provider == provider,
@@ -149,12 +181,14 @@ class RecommendationRepository:
                 PriceDaily.close_price.is_not(None),
                 PriceDaily.close_price > 0,
             )
-            .order_by(
-                PriceDaily.trade_date.desc(),
-                PriceDaily.collected_at.desc(),
-                PriceDaily.id.desc(),
-            )
+            .subquery()
         )
+        rows = session.scalars(
+            select(PriceDaily)
+            .join(ranked_ids, ranked_ids.c.price_id == PriceDaily.id)
+            .where(ranked_ids.c.rank == 1)
+        ).all()
+        return {row.stock_id: row for row in rows}
 
     def save_run(
         self,

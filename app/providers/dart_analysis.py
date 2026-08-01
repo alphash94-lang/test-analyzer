@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from hashlib import sha256
 from typing import Any, TypedDict, Unpack
@@ -13,6 +14,7 @@ from pydantic import HttpUrl, ValidationError
 from app.config import Settings
 from app.models.financial import (
     DartAuditOpinionItem,
+    DartCompanyProfileItem,
     DartDisclosureItem,
     DartDisclosurePage,
     DartDividendFactItem,
@@ -33,11 +35,13 @@ DART_DISCLOSURE_ENDPOINT = "https://opendart.fss.or.kr/api/list.json"
 DART_FINANCIAL_ENDPOINT = "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json"
 DART_DIVIDEND_ENDPOINT = "https://opendart.fss.or.kr/api/alotMatter.json"
 DART_AUDIT_ENDPOINT = "https://opendart.fss.or.kr/api/accnutAdtorNmNdAdtOpinion.json"
+DART_COMPANY_ENDPOINT = "https://opendart.fss.or.kr/api/company.json"
 
 DART_DISCLOSURE_FUNCTION = "공시검색"
 DART_FINANCIAL_FUNCTION = "단일회사 전체 재무제표"
 DART_DIVIDEND_FUNCTION = "배당에 관한 사항"
 DART_AUDIT_FUNCTION = "회계감사인의 명칭 및 감사의견"
+DART_COMPANY_FUNCTION = "기업개황"
 
 _CORP_CODE = re.compile(r"^\d{8}$")
 _REPORT_CODES = {"11011", "11012", "11013", "11014"}
@@ -113,6 +117,22 @@ class OpenDartAnalysisProvider:
         self._settings = settings
         self._client = client
         self._limiter = AsyncRateLimiter(settings.dart_requests_per_second)
+
+    @asynccontextmanager
+    async def shared_session(self):
+        """Reuse one HTTP connection pool for a multi-request refresh."""
+        if self._client is not None:
+            yield
+            return
+        async with httpx.AsyncClient(
+            timeout=self._settings.http_timeout_seconds,
+            follow_redirects=False,
+        ) as client:
+            self._client = client
+            try:
+                yield
+            finally:
+                self._client = None
 
     @property
     def name(self) -> str:
@@ -214,6 +234,22 @@ class OpenDartAnalysisProvider:
                 report_code=report_code,
             ),
             scope=scope,
+        )
+
+    async def fetch_company_profile(
+        self,
+        *,
+        corp_code: str,
+    ) -> ApiResponse[DartCompanyProfileItem]:
+        _require_corp_code(corp_code)
+        return await self._fetch_json(
+            endpoint=DART_COMPANY_ENDPOINT,
+            function_name=DART_COMPANY_FUNCTION,
+            request_parameters={"corp_code": corp_code},
+            parser=lambda body: self._parse_company_profile(
+                body,
+                corp_code=corp_code,
+            ),
         )
 
     async def fetch_dividends(
@@ -437,6 +473,17 @@ class OpenDartAnalysisProvider:
         ):
             raise ValueError("OpenDART financial response does not match the request")
         return records
+
+    @staticmethod
+    def _parse_company_profile(
+        body: dict[str, Any],
+        *,
+        corp_code: str,
+    ) -> DartCompanyProfileItem:
+        item = DartCompanyProfileItem.model_validate(body)
+        if item.corp_code != corp_code:
+            raise ValueError("OpenDART company response does not match the request")
+        return item
 
     @staticmethod
     def _parse_dividend_records(

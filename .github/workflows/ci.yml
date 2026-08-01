@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      DATABASE_URL: sqlite:///./work/ci.db
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install project and development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Check installed dependencies
+        run: python -m pip check
+
+      - name: Compile Python sources
+        run: python -m compileall -q app scripts migrations tests
+
+      - name: Run Ruff
+        run: python -m ruff check app scripts migrations tests
+
+      - name: Run Pyright
+        run: python -m pyright --pythonpath "$(command -v python)" app scripts migrations tests
+
+      - name: Validate migrations
+        run: |
+          mkdir -p work
+          python -m alembic upgrade head
+          python -m alembic current
+          python -m alembic check
+
+      - name: Run test suite
+        run: python -m pytest -p no:cacheprovider --basetemp work/pytest-ci
+
+      - name: Send failure alert
+        if: failure()
+        env:
+          UPDATE_FAILURE_WEBHOOK_URL: ${{ secrets.UPDATE_FAILURE_WEBHOOK_URL }}
+        run: >-
+          python -m scripts.send_failure_alert
+          --source github-actions
+          --title "CI failed"
+          --message "${{ github.repository }} / ${{ github.ref_name }} / ${{ github.sha }}"

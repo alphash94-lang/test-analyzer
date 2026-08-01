@@ -34,10 +34,61 @@ def test_update_all_builds_provider_steps_in_dependency_order() -> None:
         "stock_master",
         "daily_prices",
         "daily_index",
-        "events_005930",
-        "events_000660",
+        "adjusted_prices_005930",
+        "stock_analysis_005930",
+        "adjusted_prices_000660",
+        "stock_analysis_000660",
+        "market_status",
+        "events_watchlist",
+        "valuations",
+        "phase3_inputs",
+        "phase3_market",
+        "market_screening_data",
+        "phase4_recommendations",
         "ecos_macro",
     ]
+    assert steps[3].arguments == (
+        "--symbol",
+        "005930",
+        "--as-of",
+        "2026-07-29",
+    )
+    assert steps[4].arguments == (
+        "--symbol",
+        "005930",
+        "--as-of",
+        "2026-07-29",
+        "--years",
+        "5",
+    )
+    assert steps[-8].arguments == (
+        "--symbol",
+        "005930",
+        "--symbol",
+        "000660",
+        "--as-of",
+        "2026-07-29",
+    )
+    assert steps[-7].arguments == (
+        "--symbol",
+        "005930",
+        "--symbol",
+        "000660",
+        "--as-of",
+        "2026-07-29",
+    )
+    assert steps[-6].arguments == (
+        "--symbol",
+        "005930",
+        "--symbol",
+        "000660",
+        "--as-of",
+        "2026-07-29",
+    )
+    assert steps[-5].arguments == ("--as-of", "2026-07-29")
+    assert steps[-4].arguments == ("--as-of", "2026-07-29")
+    assert steps[-3].arguments == ("--as-of", "2026-07-29")
+    assert steps[-2].arguments == ("--as-of", "2026-07-29")
     assert steps[-1].arguments == (
         "--start",
         "2026-06-29",
@@ -68,7 +119,7 @@ def test_update_all_reports_successful_structured_results() -> None:
     returncode, results = run_pipeline(steps, runner=successful_runner)
 
     assert returncode == 0
-    assert len(results) == 5
+    assert len(results) == 13
     assert all(result["state"] == "AVAILABLE" for result in results)
 
 

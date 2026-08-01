@@ -40,6 +40,23 @@ _REPORT_PERIOD_RANK = {
     "11014": 3,
     "11011": 4,
 }
+_DIVIDEND_TYPE_BY_REPORT_CODE = {
+    "11011": "CASH_DPS_ANNUAL",
+    "11012": "CASH_DPS_H1",
+    "11013": "CASH_DPS_Q1",
+    "11014": "CASH_DPS_Q3",
+}
+
+
+def _dividend_fact_completeness(item: DartDividendFactItem) -> int:
+    return sum(
+        value is not None and value.strip() not in {"", "-"}
+        for value in (
+            item.current_raw,
+            item.prior_raw,
+            item.before_prior_raw,
+        )
+    )
 
 
 class FinancialRepository:
@@ -112,26 +129,41 @@ class FinancialRepository:
             session.flush()
             statements += 1
 
+            accounts_by_key: dict[
+                tuple[str | None, str, str, str],
+                FinancialAccount,
+            ] = {}
             for record in section_records:
                 account_detail = record.account_detail or ""
-                account = session.scalar(
-                    select(FinancialAccount).where(
-                        FinancialAccount.statement_id == statement.id,
-                        FinancialAccount.account_id == record.account_id,
-                        FinancialAccount.account_name == record.account_name,
-                        FinancialAccount.account_detail == account_detail,
-                        FinancialAccount.statement_section == record.statement_section,
-                    )
+                account_key = (
+                    record.account_id,
+                    record.account_name,
+                    account_detail,
+                    record.statement_section,
                 )
+                account = accounts_by_key.get(account_key)
                 if account is None:
-                    account = FinancialAccount(
-                        statement_id=statement.id,
-                        account_id=record.account_id,
-                        account_detail=account_detail,
-                        account_name=record.account_name,
-                        mapping_status="UNMAPPED",
+                    account = session.scalar(
+                        select(FinancialAccount).where(
+                            FinancialAccount.statement_id == statement.id,
+                            FinancialAccount.account_id == record.account_id,
+                            FinancialAccount.account_name == record.account_name,
+                            FinancialAccount.account_detail == account_detail,
+                            FinancialAccount.statement_section
+                            == record.statement_section,
+                        )
                     )
-                    session.add(account)
+                    if account is None:
+                        account = FinancialAccount(
+                            statement_id=statement.id,
+                            account_id=record.account_id,
+                            account_detail=account_detail,
+                            account_name=record.account_name,
+                            mapping_status="UNMAPPED",
+                        )
+                        session.add(account)
+                    accounts_by_key[account_key] = account
+                    accounts += 1
                 metric_code = map_xbrl_account(
                     record.account_id,
                     record.account_detail,
@@ -151,7 +183,6 @@ class FinancialRepository:
                     "MAPPED" if metric_code is not None else "UNMAPPED"
                 )
                 account.raw_label = record.account_name
-                accounts += 1
         session.flush()
         return statements, accounts
 
@@ -161,11 +192,28 @@ class FinancialRepository:
         *,
         stock: Stock,
         business_year: int,
+        report_code: str = "11011",
         records: list[DartDividendFactItem],
         disclosures: dict[str, Disclosure],
         raw_response_id: int | None,
         collected_at: datetime,
     ) -> tuple[int, int]:
+        dividend_type = _DIVIDEND_TYPE_BY_REPORT_CODE.get(report_code)
+        if dividend_type is None:
+            raise ValueError("unsupported OpenDART dividend report code")
+        unique_records: dict[
+            tuple[str, str, str | None],
+            DartDividendFactItem,
+        ] = {}
+        for item in records:
+            key = (item.receipt_no, item.label, item.stock_kind)
+            current = unique_records.get(key)
+            if current is None or _dividend_fact_completeness(
+                item
+            ) > _dividend_fact_completeness(current):
+                unique_records[key] = item
+        records = list(unique_records.values())
+
         fact_count = 0
         for item in records:
             fact = session.scalar(
@@ -234,13 +282,18 @@ class FinancialRepository:
             if parsed is None:
                 continue
             dps, currency = parsed
+            accepted_types = (
+                ("CASH_DPS", dividend_type)
+                if report_code == "11011"
+                else (dividend_type,)
+            )
             dividend = session.scalar(
                 select(Dividend).where(
                     Dividend.stock_id == stock.id,
                     Dividend.receipt_no == item.receipt_no,
                     Dividend.business_year == business_year,
                     Dividend.stock_kind == item.stock_kind,
-                    Dividend.dividend_type == "CASH_DPS",
+                    Dividend.dividend_type.in_(accepted_types),
                 )
             )
             if dividend is None:
@@ -249,9 +302,10 @@ class FinancialRepository:
                     business_year=business_year,
                     receipt_no=item.receipt_no,
                     stock_kind=item.stock_kind,
-                    dividend_type="CASH_DPS",
+                    dividend_type=dividend_type,
                 )
                 session.add(dividend)
+            dividend.dividend_type = dividend_type
             disclosure = disclosures.get(item.receipt_no)
             dividend.original_receipt_no = (
                 disclosure.original_receipt_no if disclosure is not None else None
@@ -295,7 +349,10 @@ class FinancialRepository:
         collected_at: datetime,
     ) -> int:
         stored = 0
-        for item in records:
+        unique_records = {
+            (item.receipt_no, item.business_year): item for item in records
+        }
+        for item in unique_records.values():
             row = session.scalar(
                 select(AuditOpinion).where(
                     AuditOpinion.receipt_no == item.receipt_no,
@@ -319,8 +376,23 @@ class FinancialRepository:
             row.special_matter = item.special_matter
             row.emphasis_matter = item.emphasis_matter
             row.core_audit_matter = item.core_audit_matter
-            row.going_concern_risk = None
-            row.going_concern_status = "NOT_VERIFIED"
+            audit_matter_texts = tuple(
+                value
+                for value in (
+                    item.special_matter,
+                    item.emphasis_matter,
+                    item.core_audit_matter,
+                )
+                if value is not None
+            )
+            if item.opinion is not None and audit_matter_texts:
+                row.going_concern_risk = any(
+                    "계속기업" in value for value in audit_matter_texts
+                )
+                row.going_concern_status = "VERIFIED"
+            else:
+                row.going_concern_risk = None
+                row.going_concern_status = "NOT_VERIFIED"
             row.emphasis_status = (
                 "AVAILABLE" if item.emphasis_matter is not None else "NOT_VERIFIED"
             )
@@ -453,10 +525,28 @@ class FinancialRepository:
                         (statement.business_year - 1, metric_code)
                     )
                     if prior_annual is not None and prior_annual[1] == account.unit:
+                        # OpenDART cash-flow rows commonly expose interim values in
+                        # thstrm_amount / frmtrm_q_amount instead of the cumulative
+                        # columns used by income-statement rows.  Both are cumulative
+                        # for Q1, half-year and Q3 reports, so use them as a documented
+                        # fallback when the dedicated cumulative fields are absent.
+                        current_cumulative = account.current_cumulative_amount
+                        prior_cumulative = account.prior_cumulative_amount
+                        if account.statement_section == "CF":
+                            current_cumulative = (
+                                current_cumulative
+                                if current_cumulative is not None
+                                else account.current_amount
+                            )
+                            prior_cumulative = (
+                                prior_cumulative
+                                if prior_cumulative is not None
+                                else account.prior_quarter_amount
+                            )
                         ttm_value = ttm_from_annual_and_interim(
                             prior_annual=prior_annual[0],
-                            current_cumulative=(account.current_cumulative_amount),
-                            prior_cumulative=(account.prior_cumulative_amount),
+                            current_cumulative=current_cumulative,
+                            prior_cumulative=prior_cumulative,
                         )
             result.append(
                 FinancialAccountView(
@@ -505,20 +595,21 @@ class FinancialRepository:
             statement = statement.where(Dividend.filing_date <= as_of_date)
         rows = session.scalars(statement).all()
         years: list[int] = []
-        seen: set[tuple[int, str | None]] = set()
+        seen: set[tuple[int, str | None, str | None]] = set()
         result: list[DividendView] = []
         for row in rows:
             if row.business_year not in years:
                 if len(years) >= limit_years:
                     continue
                 years.append(row.business_year)
-            key = (row.business_year, row.stock_kind)
+            key = (row.business_year, row.stock_kind, row.dividend_type)
             if key in seen:
                 continue
             seen.add(key)
             result.append(
                 DividendView(
                     business_year=row.business_year,
+                    dividend_type=row.dividend_type,
                     stock_kind=row.stock_kind,
                     dps=row.dps,
                     currency=row.currency,
@@ -529,6 +620,99 @@ class FinancialRepository:
                     is_confirmed=row.is_confirmed,
                     is_estimate=row.is_estimate,
                     source_url=row.source_url,
+                )
+            )
+        return tuple(result)
+
+    def annual_mapped_account_history(
+        self,
+        session: Session,
+        stock_id: int,
+        *,
+        limit_years: int = 3,
+    ) -> tuple[FinancialAccountView, ...]:
+        if limit_years < 1:
+            raise ValueError("financial history year limit must be positive")
+        rows = session.execute(
+            select(FinancialAccount, FinancialStatement)
+            .join(
+                FinancialStatement,
+                FinancialAccount.statement_id == FinancialStatement.id,
+            )
+            .where(
+                FinancialStatement.stock_id == stock_id,
+                FinancialStatement.report_code == "11011",
+                FinancialStatement.data_state == DataState.AVAILABLE.value,
+                FinancialAccount.canonical_metric_code.is_not(None),
+                FinancialAccount.current_amount.is_not(None),
+            )
+            .order_by(
+                FinancialStatement.business_year.desc(),
+                case(
+                    (FinancialStatement.fs_div == "CFS", 0),
+                    (FinancialStatement.fs_div == "OFS", 1),
+                    else_=2,
+                ),
+                FinancialStatement.filing_date.desc(),
+                FinancialStatement.receipt_no.desc(),
+                case(
+                    (FinancialStatement.statement_kind == "IS", 0),
+                    (FinancialStatement.statement_kind == "CIS", 1),
+                    (FinancialStatement.statement_kind == "CF", 2),
+                    (FinancialStatement.statement_kind == "BS", 3),
+                    else_=4,
+                ),
+            )
+        ).all()
+        years: list[int] = []
+        for _, statement in rows:
+            if statement.business_year not in years:
+                if len(years) >= limit_years:
+                    continue
+                years.append(statement.business_year)
+        selected_scopes: dict[int, str] = {}
+        for year in years:
+            scopes = {
+                statement.fs_div
+                for _, statement in rows
+                if statement.business_year == year
+            }
+            if FinancialScope.CONSOLIDATED.value in scopes:
+                selected_scopes[year] = FinancialScope.CONSOLIDATED.value
+            elif FinancialScope.SEPARATE.value in scopes:
+                selected_scopes[year] = FinancialScope.SEPARATE.value
+
+        result: list[FinancialAccountView] = []
+        seen: set[tuple[int, str]] = set()
+        for account, statement in rows:
+            metric_code = account.canonical_metric_code
+            if (
+                statement.business_year not in selected_scopes
+                or statement.fs_div != selected_scopes[statement.business_year]
+                or metric_code is None
+            ):
+                continue
+            key = (statement.business_year, metric_code)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                FinancialAccountView(
+                    metric_code=metric_code,
+                    account_name=account.account_name,
+                    value=account.current_amount,
+                    cumulative_value=account.current_cumulative_amount,
+                    ttm_value=account.current_amount,
+                    currency=account.unit,
+                    statement_section=account.statement_section,
+                    business_year=statement.business_year,
+                    report_code=statement.report_code,
+                    fs_div=FinancialScope(statement.fs_div),
+                    filing_date=statement.filing_date,
+                    receipt_no=statement.receipt_no,
+                    source_url=statement.source_url,
+                    mapping_status=account.mapping_status,
+                    calculation_source=None,
                 )
             )
         return tuple(result)

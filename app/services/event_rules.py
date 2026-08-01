@@ -28,6 +28,36 @@ class EventRule:
 
 _RULES = (
     EventRule(
+        "DEFAULT_INSOLVENCY",
+        "부도·은행거래 정지",
+        EventSentiment.NEGATIVE,
+        ("부도발생", "은행거래정지"),
+    ),
+    EventRule(
+        "REHABILITATION",
+        "회생절차",
+        EventSentiment.NEGATIVE,
+        ("회생절차개시신청", "회생절차 개시신청"),
+    ),
+    EventRule(
+        "DISSOLUTION",
+        "해산",
+        EventSentiment.NEGATIVE,
+        ("해산사유발생", "해산 사유 발생"),
+    ),
+    EventRule(
+        "BUSINESS_SUSPENSION",
+        "영업정지",
+        EventSentiment.NEGATIVE,
+        ("영업정지", "주된 영업의 정지"),
+    ),
+    EventRule(
+        "DELISTING",
+        "상장폐지",
+        EventSentiment.NEGATIVE,
+        ("상장폐지결정", "상장폐지 결정", "상장폐지"),
+    ),
+    EventRule(
         "EMBEZZLEMENT_BREACH",
         "횡령·배임",
         EventSentiment.NEGATIVE,
@@ -153,6 +183,31 @@ _RULES = (
     ),
 )
 
+_SEVERE_DISCLOSURE_RULES = frozenset(
+    {
+        "DEFAULT_INSOLVENCY",
+        "REHABILITATION",
+        "DISSOLUTION",
+        "BUSINESS_SUSPENSION",
+        "DELISTING",
+        "EMBEZZLEMENT_BREACH",
+        "AUDIT_RISK",
+        "SANCTION",
+    }
+)
+_MANUAL_REVIEW_RULES = frozenset(
+    {
+        "RIGHTS_OFFERING",
+        "MEZZANINE_ISSUE",
+        "DIVIDEND_CUT",
+        "LITIGATION",
+        "IMPAIRMENT",
+        "OPERATING_LOSS",
+        "CONTROLLING_SHAREHOLDER_CHANGE",
+        "BUSINESS_REORGANIZATION",
+    }
+)
+
 
 def disclosure_base_title(title: str) -> str:
     return normalize_disclosure_base_title(title)
@@ -234,6 +289,27 @@ def classify_news(
         price_reflection_note=_PRICE_REFLECTION_NOTE,
         rule_version=rule_version,
     )
+
+
+def corporate_event_screen(titles: tuple[str, ...]) -> str:
+    """Reduce verified OpenDART disclosure titles to the Phase 2 screen."""
+
+    result = "CLEAR"
+    for title in titles:
+        classified = classify_disclosure(title)
+        if classified is None:
+            continue
+        if (
+            classified.matched_rule in _SEVERE_DISCLOSURE_RULES
+            and not classified.matched_rule.startswith("CORRECTION_")
+        ):
+            return "SEVERE"
+        if (
+            classified.matched_rule in _MANUAL_REVIEW_RULES
+            or classified.matched_rule.startswith("CORRECTION_")
+        ):
+            result = "REVIEW"
+    return result
 
 
 def _classified(

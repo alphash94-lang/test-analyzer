@@ -45,13 +45,18 @@ def test_alembic_upgrade_creates_required_schema(
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "u7j0k1l2m3n4"
+            == "v8k1l2m3n4o5"
         )
         watchlist_columns = {
             column["name"]
             for column in inspect(engine).get_columns("event_watchlist_items")
         }
         assert "news_query" in watchlist_columns
+        price_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("price_daily")
+        }
+        assert "previous_day_change" in price_columns
         stock_columns = {
             column["name"] for column in inspect(engine).get_columns("stocks")
         }

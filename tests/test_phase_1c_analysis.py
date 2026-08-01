@@ -21,6 +21,7 @@ from app.db.models.quality import ApiRawResponse
 from app.db.session import create_db_engine, create_session_factory
 from app.models.financial import (
     DartAuditOpinionItem,
+    DartCompanyProfileItem,
     DartDisclosureItem,
     DartDividendFactItem,
     DartFinancialAccountItem,
@@ -36,7 +37,10 @@ from app.providers.dart_analysis import OpenDartAnalysisProvider
 from app.repositories.financial_repository import FinancialRepository
 from app.services.account_mapping import map_xbrl_account
 from app.services.dividend_service import parse_confirmed_dividend_fact
-from app.services.stock_analysis_service import StockAnalysisService
+from app.services.stock_analysis_service import (
+    StockAnalysisService,
+    _incremental_report_codes,
+)
 from app.utils.dates import now_kst
 from app.utils.financial_math import (
     cumulative_to_quarters,
@@ -113,6 +117,87 @@ def test_dividend_parser_only_accepts_explicit_unit_label() -> None:
         )
         is None
     )
+
+
+def test_dividend_upsert_deduplicates_and_keeps_informative_fact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(
+        tmp_path / "duplicate-dividend-facts.db",
+        monkeypatch,
+    )
+    settings = make_settings(database_url=database_url)
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    collected_at = now_kst()
+    common = {
+        "rcept_no": "20220805000318",
+        "corp_cls": "Y",
+        "corp_code": "00126380",
+        "corp_name": "분석검증",
+        "se": "주당 현금배당금(원)",
+        "stock_knd": "-",
+        "stlm_dt": "2021-12-31",
+    }
+    records = [
+        DartDividendFactItem.model_validate(
+            {
+                **common,
+                "thstrm": "270",
+                "frmtrm": "210",
+                "lwfr": "300",
+            }
+        ),
+        DartDividendFactItem.model_validate(
+            {
+                **common,
+                "thstrm": "-",
+                "frmtrm": "-",
+                "lwfr": "-",
+            }
+        ),
+    ]
+
+    with sessions.begin() as session:
+        stock = _stock(collected_at)
+        session.add(stock)
+        session.flush()
+        disclosure = Disclosure(
+            stock_id=stock.id,
+            corp_code="00126380",
+            receipt_no=common["rcept_no"],
+            report_name="사업보고서",
+            receipt_date=date(2022, 8, 5),
+            source_url=common["rcept_no"],
+            is_correction=False,
+            source_provider="OpenDART",
+            source_function="공시검색",
+            data_state=DataState.AVAILABLE.value,
+            collected_at=collected_at,
+            data_timing=DataTiming.PERIODIC_DISCLOSURE.value,
+        )
+        session.add(disclosure)
+        session.flush()
+        fact_count, dividend_count = FinancialRepository().upsert_dividends(
+            session,
+            stock=stock,
+            business_year=2021,
+            records=records,
+            disclosures={common["rcept_no"]: disclosure},
+            raw_response_id=None,
+            collected_at=collected_at,
+        )
+
+    with sessions() as session:
+        fact = session.query(DividendFact).one()
+        dividend = session.query(Dividend).one()
+        assert fact.current_raw == "270"
+        assert dividend.dps == Decimal(270)
+    engine.dispose()
+
+    assert fact_count == 1
+    assert dividend_count == 1
 
 
 def test_dart_no_data_is_not_available_payload() -> None:
@@ -425,6 +510,59 @@ def test_dart_audit_contract_rejects_future_business_year() -> None:
     assert response.error_code == "SCHEMA_VALIDATION_FAILED"
 
 
+def test_dart_financial_account_accepts_omitted_optional_amounts() -> None:
+    item = DartFinancialAccountItem.model_validate(
+        {
+            "rcept_no": "20260331000001",
+            "reprt_code": "11011",
+            "bsns_year": "2025",
+            "corp_code": "00126380",
+            "sj_div": "BS",
+            "sj_nm": "재무상태표",
+            "account_nm": "자산총계",
+            "thstrm_nm": "제57기",
+            "frmtrm_nm": "제56기",
+            "ord": "1",
+        }
+    )
+
+    assert item.current_amount is None
+    assert item.current_cumulative_amount is None
+    assert item.prior_amount is None
+    assert item.currency is None
+
+
+def test_dart_audit_uses_fiscal_date_for_business_year() -> None:
+    item = DartAuditOpinionItem.model_validate(
+        {
+            "rcept_no": "20260331000001",
+            "corp_cls": "Y",
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "bsns_year": "제57기 \n(당기)",
+            "adtor": "삼일회계법인",
+            "adt_opinion": "적정",
+            "stlm_dt": "2025-12-31",
+        }
+    )
+
+    assert item.business_year_label == "제57기 \n(당기)"
+    assert item.business_year == 2025
+
+
+def test_dart_company_profile_requires_official_industry_code() -> None:
+    item = DartCompanyProfileItem.model_validate(
+        {
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "stock_code": "005930",
+            "induty_code": "264",
+        }
+    )
+
+    assert item.industry_code == "264"
+
+
 def test_official_disclosure_modification_prefixes_are_preserved() -> None:
     item = DartDisclosureItem.model_validate(
         {
@@ -713,6 +851,9 @@ def _available_response[PayloadT](
 
 
 class _UnmatchedReceiptProvider:
+    async def fetch_company_profile(self, **_: object) -> ApiResponse[object]:
+        return _missing_response("기업개황")
+
     async def fetch_disclosures(self, **_: object) -> ApiResponse[object]:
         return _missing_response("공시검색")
 
@@ -743,8 +884,12 @@ class _UnmatchedReceiptProvider:
 
     async def fetch_dividends(
         self,
+        *,
+        report_code: str,
         **_: object,
     ) -> ApiResponse[list[DartDividendFactItem]]:
+        if report_code != "11011":
+            return _missing_response("배당에 관한 사항")  # type: ignore[return-value]
         item = DartDividendFactItem.model_validate(
             {
                 "rcept_no": "20260331000002",
@@ -811,7 +956,12 @@ class _RecordingMissingProvider:
     def __init__(self) -> None:
         self.audit_years: list[int] = []
         self.dividend_years: list[int] = []
+        self.dividend_requests: list[tuple[int, str]] = []
         self.financial_years: list[int] = []
+        self.financial_requests: list[tuple[int, str, FinancialScope]] = []
+
+    async def fetch_company_profile(self, **_: object) -> ApiResponse[object]:
+        return _missing_response("기업개황")
 
     async def fetch_disclosures(self, **_: object) -> ApiResponse[object]:
         return _missing_response("공시검색")
@@ -829,19 +979,96 @@ class _RecordingMissingProvider:
         self,
         *,
         business_year: int,
+        report_code: str,
         **_: object,
     ) -> ApiResponse[object]:
-        self.dividend_years.append(business_year)
+        self.dividend_requests.append((business_year, report_code))
+        if report_code == "11011":
+            self.dividend_years.append(business_year)
         return _missing_response("배당에 관한 사항")
 
     async def fetch_financials(
         self,
         *,
         business_year: int,
+        report_code: str,
+        scope: FinancialScope,
         **_: object,
     ) -> ApiResponse[object]:
         self.financial_years.append(business_year)
+        self.financial_requests.append((business_year, report_code, scope))
         return _missing_response("단일회사 전체 재무제표")
+
+
+def test_incremental_report_plan_uses_only_filed_periods() -> None:
+    as_of_date = date(2026, 7, 31)
+
+    assert _incremental_report_codes(
+        2025,
+        as_of_date,
+        include_all_interims=False,
+    ) == ("11011",)
+    assert _incremental_report_codes(
+        2026,
+        as_of_date,
+        include_all_interims=False,
+    ) == ("11013",)
+    assert _incremental_report_codes(
+        2026,
+        as_of_date,
+        include_all_interims=True,
+    ) == ("11013",)
+
+
+def test_incremental_refresh_skips_historical_quarterly_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(
+        tmp_path / "incremental-window.db",
+        monkeypatch,
+    )
+    settings = make_settings(
+        database_url=database_url,
+        raw_data_dir=tmp_path / "raw",
+    )
+    engine = create_db_engine(settings)
+    sessions = create_session_factory(engine)
+    with sessions.begin() as session:
+        session.add(_stock(now_kst()))
+    engine.dispose()
+    provider = _RecordingMissingProvider()
+
+    service = StockAnalysisService(
+        settings,
+        provider=provider,  # type: ignore[arg-type]
+    )
+    asyncio.run(
+        service.refresh(
+            symbol="000001",
+            as_of_date=date(2026, 7, 31),
+            years=3,
+            incremental=True,
+        )
+    )
+    service.close()
+
+    assert provider.audit_years == [2023, 2024, 2025]
+    assert provider.dividend_requests == [
+        (2023, "11011"),
+        (2024, "11011"),
+        (2025, "11011"),
+        (2026, "11013"),
+    ]
+    assert provider.financial_requests == [
+        (year, report_code, scope)
+        for year, report_code in (
+            (2024, "11011"),
+            (2025, "11011"),
+            (2026, "11013"),
+        )
+        for scope in (FinancialScope.CONSOLIDATED, FinancialScope.SEPARATE)
+    ]
 
 
 def test_five_year_dividend_request_includes_prior_completed_year_candidate(
@@ -878,6 +1105,11 @@ def test_five_year_dividend_request_includes_prior_completed_year_candidate(
 
     assert provider.audit_years == [2021, 2022, 2023, 2024, 2025, 2026]
     assert provider.dividend_years == [2021, 2022, 2023, 2024, 2025, 2026]
+    assert provider.dividend_requests == [
+        (year, report_code)
+        for year in range(2021, 2027)
+        for report_code in ("11011", "11012", "11013", "11014")
+    ]
     assert min(provider.financial_years) == 2022
 
 

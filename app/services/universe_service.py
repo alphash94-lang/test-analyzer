@@ -17,7 +17,6 @@ from app.providers.dart import (
 )
 from app.providers.krx import (
     KRX_STOCK_MASTER_ENDPOINT,
-    KRX_STOCK_MASTER_FUNCTION,
     KrxProvider,
 )
 from app.repositories.data_quality_repository import DataQualityRepository
@@ -33,11 +32,19 @@ class UniverseService:
         settings: Settings,
         *,
         krx_provider: KrxProvider | None = None,
+        kosdaq_provider: KrxProvider | None = None,
         dart_provider: OpenDartProvider | None = None,
         stock_repository: StockRepository | None = None,
     ) -> None:
         self._settings = settings
-        self._krx = krx_provider or KrxProvider(settings)
+        self._krx_providers = (
+            (krx_provider,)
+            if krx_provider is not None and kosdaq_provider is None
+            else (
+                krx_provider or KrxProvider(settings, market="KOSPI"),
+                kosdaq_provider or KrxProvider(settings, market="KOSDAQ"),
+            )
+        )
         self._dart = dart_provider or OpenDartProvider(settings)
         self._quality = DataQualityRepository()
         self._stocks = stock_repository or StockRepository(self._quality)
@@ -48,27 +55,48 @@ class UniverseService:
     async def refresh(self, as_of_date: date) -> UniverseRefreshSummary:
         started_at = now_kst()
         errors: list[str] = []
-        krx_response = await self._krx.fetch(as_of_date=as_of_date)
-        if krx_response.state != DataState.AVAILABLE:
-            if krx_response.error_message:
-                errors.append(krx_response.error_message)
-            with self._sessions.begin() as session:
-                self._save_krx_raw(session, as_of_date, krx_response)
-                self._quality.add(
-                    session,
-                    entity_type="universe_refresh",
-                    entity_id=as_of_date.isoformat(),
-                    provider="KRX",
-                    issue_code=krx_response.state.value,
-                    severity="ERROR",
-                    data_state=krx_response.state,
-                    message=(
-                        krx_response.error_message
-                        or "KRX 종목 마스터를 사용할 수 없습니다."
-                    ),
+        krx_responses = [
+            await provider.fetch(as_of_date=as_of_date)
+            for provider in self._krx_providers
+        ]
+        available_krx = [
+            response
+            for response in krx_responses
+            if response.state == DataState.AVAILABLE
+            and response.payload is not None
+        ]
+        for response in krx_responses:
+            if (
+                response.state != DataState.AVAILABLE
+                and response.error_message
+            ):
+                errors.append(
+                    f"{response.metadata.function_name}: "
+                    f"{response.error_message}"
                 )
+        if not available_krx:
+            with self._sessions.begin() as session:
+                for response in krx_responses:
+                    self._save_krx_raw(session, as_of_date, response)
+                    self._quality.add(
+                        session,
+                        entity_type="universe_refresh",
+                        entity_id=(
+                            f"{as_of_date.isoformat()}:"
+                            f"{response.metadata.function_name}"
+                        ),
+                        provider="KRX",
+                        issue_code=response.state.value,
+                        severity="ERROR",
+                        data_state=response.state,
+                        message=(
+                            response.error_message
+                            or "KRX 종목 마스터를 사용할 수 없습니다."
+                        ),
+                    )
+            first_response = krx_responses[0]
             return UniverseRefreshSummary(
-                state=krx_response.state.value,
+                state=first_response.state.value,
                 started_at=started_at,
                 finished_at=now_kst(),
                 as_of_date=as_of_date,
@@ -80,17 +108,24 @@ class UniverseService:
             errors.append(dart_response.error_message)
 
         classified = [
-            classify_krx_stock(record) for record in (krx_response.payload or [])
+            classify_krx_stock(record)
+            for response in available_krx
+            for record in (response.payload or [])
         ]
+        latest_krx_metadata = max(
+            available_krx,
+            key=lambda response: response.metadata.collected_at,
+        ).metadata
         with self._sessions.begin() as session:
-            self._save_krx_raw(session, as_of_date, krx_response)
+            for response in krx_responses:
+                self._save_krx_raw(session, as_of_date, response)
             self._save_dart_raw(session, dart_response)
             upserted, review_required = self._stocks.upsert_krx_records(
                 session,
                 classified,
-                as_of_at=krx_response.metadata.as_of_at
-                or krx_response.metadata.collected_at,
-                collected_at=krx_response.metadata.collected_at,
+                as_of_at=latest_krx_metadata.as_of_at
+                or latest_krx_metadata.collected_at,
+                collected_at=latest_krx_metadata.collected_at,
             )
             dart_mapped = 0
             if (
@@ -125,12 +160,15 @@ class UniverseService:
             state=(
                 DataState.AVAILABLE.value
                 if dart_response.state == DataState.AVAILABLE
+                and len(available_krx) == len(krx_responses)
                 else "PARTIAL"
             ),
             started_at=started_at,
             finished_at=now_kst(),
             as_of_date=as_of_date,
-            krx_received=len(krx_response.payload or []),
+            krx_received=sum(
+                len(response.payload or []) for response in available_krx
+            ),
             stocks_upserted=upserted,
             dart_received=len(dart_response.payload or []),
             dart_mapped=dart_mapped,
@@ -158,8 +196,10 @@ class UniverseService:
         self._raw.save(
             session,
             provider="KRX",
-            function_name=KRX_STOCK_MASTER_FUNCTION,
-            endpoint=KRX_STOCK_MASTER_ENDPOINT,
+            function_name=response.metadata.function_name,
+            endpoint=str(
+                response.metadata.source_url or KRX_STOCK_MASTER_ENDPOINT
+            ),
             request_parameters={"basDd": as_of_date.strftime("%Y%m%d")},
             response=response,
         )

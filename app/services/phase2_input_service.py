@@ -25,6 +25,9 @@ from app.models.scoring import (
 )
 from app.repositories.financial_repository import FinancialRepository
 from app.repositories.phase2_input_repository import (
+    DART_DETAILED_INDUSTRY_SYSTEM,
+    DART_INDUSTRY_KIND_SYSTEM,
+    DART_PARENT_INDUSTRY_SYSTEM,
     DETAILED_INDUSTRY_SYSTEM,
     INDUSTRY_KIND_SYSTEM,
     MARKET_STATUS_TYPES,
@@ -134,7 +137,7 @@ def _liquidity_evidence(
             len(rows) >= rules.liquidity_days
             and currency == "KRW"
             and all(
-                row.source_provider in {"KRX", "KIS"}
+                row.source_provider in {"KRX", "KIS", "한국투자증권"}
                 for row in rows[: rules.liquidity_days]
             )
         ),
@@ -232,6 +235,12 @@ class Phase2InputAssembler:
                 INDUSTRY_KIND_SYSTEM,
                 as_of_at,
             )
+            or self._input.classification(
+                session,
+                stock.id,
+                DART_INDUSTRY_KIND_SYSTEM,
+                as_of_at,
+            )
         )
         repeated_losses = self._input.repeated_operating_losses(
             session,
@@ -298,11 +307,21 @@ class Phase2InputAssembler:
             stock.id,
             DETAILED_INDUSTRY_SYSTEM,
             as_of_at,
+        ) or self._input.classification(
+            session,
+            stock.id,
+            DART_DETAILED_INDUSTRY_SYSTEM,
+            as_of_at,
         )
         parent_industry = self._input.classification(
             session,
             stock.id,
             PARENT_INDUSTRY_SYSTEM,
+            as_of_at,
+        ) or self._input.classification(
+            session,
+            stock.id,
+            DART_PARENT_INDUSTRY_SYSTEM,
             as_of_at,
         )
         current_per, current_pbr = self._input.valuation_for_stock(

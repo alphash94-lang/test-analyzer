@@ -136,6 +136,7 @@ class PriceDaily(Base, CreatedAtMixin, SourceMetadataMixin):
     high_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     low_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     close_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    previous_day_change: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     volume: Mapped[Decimal | None] = mapped_column(Numeric(30, 0))
     trading_value: Mapped[Decimal | None] = mapped_column(Numeric(30, 2))
     market_cap: Mapped[Decimal | None] = mapped_column(Numeric(30, 2))

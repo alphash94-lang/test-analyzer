@@ -128,6 +128,42 @@ class DartDisclosurePage(BaseModel):
     total_page: int = Field(ge=1)
 
 
+class DartCompanyProfileItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    corp_code: str
+    corp_name: str
+    stock_code: str | None = None
+    industry_code: str = Field(alias="induty_code")
+
+    @field_validator(
+        "corp_code",
+        "corp_name",
+        "stock_code",
+        "industry_code",
+        mode="before",
+    )
+    @classmethod
+    def normalize_text(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip() or None
+
+    @field_validator("corp_code")
+    @classmethod
+    def validate_corp_code(cls, value: str) -> str:
+        if not _CORP_CODE.fullmatch(value):
+            raise ValueError("OpenDART corp_code must be eight digits")
+        return value
+
+    @field_validator("industry_code")
+    @classmethod
+    def validate_industry_code(cls, value: str) -> str:
+        if not value.isdigit():
+            raise ValueError("OpenDART induty_code must contain digits")
+        return value
+
+
 class DartFinancialAccountItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -137,14 +173,17 @@ class DartFinancialAccountItem(BaseModel):
     corp_code: str
     statement_section: str = Field(alias="sj_div")
     statement_name: str = Field(alias="sj_nm")
-    account_id: str | None
+    account_id: str | None = None
     account_name: str = Field(alias="account_nm")
     account_detail: str | None = None
     current_period_name: str = Field(alias="thstrm_nm")
-    current_amount: Decimal | None = Field(alias="thstrm_amount")
-    current_cumulative_amount: Decimal | None = Field(alias="thstrm_add_amount")
-    prior_period_name: str = Field(alias="frmtrm_nm")
-    prior_amount: Decimal | None = Field(alias="frmtrm_amount")
+    current_amount: Decimal | None = Field(default=None, alias="thstrm_amount")
+    current_cumulative_amount: Decimal | None = Field(
+        default=None,
+        alias="thstrm_add_amount",
+    )
+    prior_period_name: str | None = Field(default=None, alias="frmtrm_nm")
+    prior_amount: Decimal | None = Field(default=None, alias="frmtrm_amount")
     prior_quarter_name: str | None = Field(default=None, alias="frmtrm_q_nm")
     prior_quarter_amount: Decimal | None = Field(
         default=None,
@@ -163,7 +202,7 @@ class DartFinancialAccountItem(BaseModel):
         alias="bfefrmtrm_amount",
     )
     order: int = Field(alias="ord")
-    currency: str | None
+    currency: str | None = None
 
     @field_validator(
         "current_amount",
@@ -186,7 +225,6 @@ class DartFinancialAccountItem(BaseModel):
         "statement_name",
         "account_name",
         "current_period_name",
-        "prior_period_name",
         mode="before",
     )
     @classmethod
@@ -200,7 +238,7 @@ class DartFinancialAccountItem(BaseModel):
 
     @field_validator(
         "account_id",
-        "account_detail",
+        "prior_period_name",
         "prior_quarter_name",
         "before_prior_period_name",
         "currency",
@@ -211,6 +249,14 @@ class DartFinancialAccountItem(BaseModel):
         if value is None:
             return None
         return str(value).strip() or None
+
+    @field_validator("account_detail", mode="before")
+    @classmethod
+    def normalize_account_detail(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return None if normalized in {"", "-"} else normalized
 
     @field_validator("receipt_no")
     @classmethod
@@ -300,7 +346,7 @@ class DartAuditOpinionItem(BaseModel):
     corp_class: str = Field(alias="corp_cls")
     corp_code: str
     corp_name: str
-    business_year: int = Field(alias="bsns_year", ge=2015)
+    business_year_label: str = Field(alias="bsns_year")
     auditor: str | None = Field(default=None, alias="adtor")
     opinion: str | None = Field(default=None, alias="adt_opinion")
     special_matter: str | None = Field(
@@ -314,11 +360,18 @@ class DartAuditOpinionItem(BaseModel):
     )
     fiscal_date: date = Field(alias="stlm_dt")
 
+    @property
+    def business_year(self) -> int:
+        """The audit API labels periods; stlm_dt carries the fiscal year."""
+
+        return self.fiscal_date.year
+
     @field_validator(
         "receipt_no",
         "corp_class",
         "corp_code",
         "corp_name",
+        "business_year_label",
         mode="before",
     )
     @classmethod
@@ -416,6 +469,7 @@ class FinancialAccountView(BaseModel):
 
 class DividendView(BaseModel):
     business_year: int
+    dividend_type: str | None
     stock_kind: str | None
     dps: Decimal | None
     currency: str | None
@@ -457,6 +511,7 @@ class StockAnalysisSnapshot(BaseModel):
     symbol: str
     financial_scope: FinancialScope
     financial_accounts: tuple[FinancialAccountView, ...] = ()
+    financial_history: tuple[FinancialAccountView, ...] = ()
     dividends: tuple[DividendView, ...] = ()
     latest_audit: AuditOpinionView | None = None
     dividend_decisions: tuple[DisclosureView, ...] = ()

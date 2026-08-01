@@ -47,6 +47,26 @@ def _sum_contributions(components: tuple[ScoreComponent, ...]) -> Decimal:
     )
 
 
+# These are supporting comparisons, not facts that every listed company can
+# possess.  A newly initiated dividend, a non-dividend policy, or insufficient
+# stored valuation history must not by itself make the whole quality score
+# impossible.  Missing items are excluded and the remaining weights are
+# normalized, while data confidence continues to reflect reduced coverage.
+_SUPPORTING_COMPONENTS = {
+    "DIVIDEND_CONTINUITY",
+    "DIVIDEND_STABILITY",
+    "HISTORICAL_PER",
+    "HISTORICAL_PBR",
+}
+_REQUIRED_FINANCIAL_COMPONENTS = {
+    "OPERATING_MARGIN",
+    "ROE",
+    "DEBT_RATIO",
+    "CASH_CONVERSION",
+}
+_MINIMUM_CORE_WEIGHT_COVERAGE = Decimal("0.60")
+
+
 def evaluate_phase2(
     evidence: Phase2Evidence,
     rules: Phase2Rules,
@@ -103,13 +123,45 @@ def evaluate_phase2(
             *valuation,
         )
         unavailable_core = [
-            item.code for item in core if item.state != ComponentState.AVAILABLE
-        ]
-        missing_core.extend(unavailable_core)
-        if not unavailable_core:
-            investment_score = quantize_score(
-                _sum_contributions(core) / rules.core_weight_total * Decimal(100)
+            item.code
+            for item in core
+            if item.state != ComponentState.AVAILABLE
+            and (
+                item.code not in _SUPPORTING_COMPONENTS
+                or item.state == ComponentState.NOT_APPLICABLE
             )
+        ]
+        available_core = tuple(
+            item for item in core if item.state == ComponentState.AVAILABLE
+        )
+        available_weight = sum(
+            (item.weight or Decimal(0) for item in available_core),
+            start=Decimal(0),
+        )
+        required_available = _REQUIRED_FINANCIAL_COMPONENTS <= {
+            item.code for item in available_core
+        }
+        missing_core.extend(unavailable_core)
+        if (
+            not unavailable_core
+            and required_available
+            and available_weight
+            >= rules.core_weight_total * _MINIMUM_CORE_WEIGHT_COVERAGE
+        ):
+            investment_score = quantize_score(
+                _sum_contributions(available_core)
+                / available_weight
+                * Decimal(100)
+            )
+        elif not required_available:
+            missing_core.extend(
+                sorted(
+                    _REQUIRED_FINANCIAL_COMPONENTS
+                    - {item.code for item in available_core}
+                )
+            )
+        elif available_weight < rules.core_weight_total * _MINIMUM_CORE_WEIGHT_COVERAGE:
+            missing_core.append("CORE_DATA_COVERAGE")
         entry = entry_components(evidence.entry)
         if all(component.state == ComponentState.AVAILABLE for component in entry):
             individual_entry_score = quantize_score(

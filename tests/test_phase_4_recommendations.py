@@ -311,6 +311,30 @@ def test_portfolio_weight_rounding_never_exceeds_stock_cap() -> None:
     assert allocated.target_weight <= stock_cap
 
 
+def test_general_review_receives_conditional_target_but_no_initial_buy() -> None:
+    settings = get_settings()
+    rules = phase4_rules_from_settings(settings)
+    profile = default_portfolio_profile(settings)
+    decision = evaluate_recommendation(
+        _input(
+            _phase2(investment_score=Decimal(65)),
+            _market(regime=MarketRegime.RED),
+        ),
+        rules,
+    )
+
+    allocated = allocate_portfolio(
+        (decision,),
+        profile,
+        MarketRegime.RED,
+        rules,
+    )[0]
+
+    assert decision.category == RecommendationCategory.GENERAL_REVIEW
+    assert allocated.target_weight == profile.max_dividend_stock_weight
+    assert allocated.initial_buy_weight == Decimal(0)
+
+
 def test_target_count_keeps_nonzero_growth_sleeve_from_being_starved() -> None:
     settings = get_settings()
     rules = phase4_rules_from_settings(settings)
@@ -418,6 +442,33 @@ def test_empty_universe_run_is_reused_without_fake_recommendations(
         assert session.scalar(select(func.count(RecommendationRun.id))) == 1
         assert session.scalar(select(func.count(Recommendation.id))) == 0
     engine.dispose()
+
+
+def test_recommendation_screening_uses_standard_order_without_total_capital(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = migrate_database(tmp_path / "phase4-order.db", monkeypatch)
+    settings = get_settings().model_copy(update={"database_url": database_url})
+    service = RecommendationService(settings)
+    try:
+        profile = default_portfolio_profile(settings)
+        assert profile.total_capital is None
+        assert service._planned_order_amount(profile) == Decimal(1_000_000)
+
+        configured = settings.model_copy(
+            update={"phase2_planned_order_amount_krw": Decimal(2_000_000)}
+        )
+        configured_service = RecommendationService(configured)
+        try:
+            assert (
+                configured_service._planned_order_amount(profile)
+                == Decimal(2_000_000)
+            )
+        finally:
+            configured_service.close()
+    finally:
+        service.close()
 
 
 def test_repository_saves_reasons_plan_and_read_only_allocation(
