@@ -26,7 +26,7 @@ from app.db.session import create_db_engine, create_session_factory
 from app.models.ecos import EcosObservation
 from app.models.status import ConnectionState
 from app.repositories.event_watchlist_repository import WATCHLIST_CATEGORY
-from app.services.connection_status import get_connection_statuses
+from app.ui.connection_status import cached_connection_statuses
 from app.utils.dates import restore_database_kst
 
 
@@ -556,7 +556,9 @@ def render_krx_preview(settings: Settings) -> None:
     )
 
     krx_status = next(
-        item for item in get_connection_statuses(settings) if item.provider == "KRX"
+        item
+        for item in cached_connection_statuses(settings)
+        if item.provider == "KRX"
     )
     if krx_status.state == ConnectionState.CONNECTED:
         st.success(f"KRX 연결됨 · {krx_status.detail}")
@@ -620,25 +622,36 @@ def render_krx_preview(settings: Settings) -> None:
                     "ECOS 금리·환율 차트",
                     "전체 데이터 최신 수집 시각",
                     "KRX 수집 이력",
-                ]
+                ],
+                on_change="rerun",
+                key="data_preview_tabs",
             )
-            with stock_tab:
-                _render_stock_master(session)
-            with price_tab:
-                _render_daily_prices(session)
-            with index_tab:
-                _render_indexes(session)
-            with dart_tab:
-                _render_dart_disclosures(session, preview_stock)
-            with kis_tab:
-                _render_kis_preview(session, preview_stock)
-            with news_tab:
-                _render_naver_news(session, preview_stock)
-            with ecos_tab:
-                _render_ecos_charts(session)
-            with latest_tab:
-                _render_all_latest(session)
-            with history_tab:
-                _render_collection_history(session)
+            if stock_tab.open:
+                with stock_tab:
+                    _render_stock_master(session)
+            if price_tab.open:
+                with price_tab:
+                    _render_daily_prices(session)
+            if index_tab.open:
+                with index_tab:
+                    _render_indexes(session)
+            if dart_tab.open:
+                with dart_tab:
+                    _render_dart_disclosures(session, preview_stock)
+            if kis_tab.open:
+                with kis_tab:
+                    _render_kis_preview(session, preview_stock)
+            if news_tab.open:
+                with news_tab:
+                    _render_naver_news(session, preview_stock)
+            if ecos_tab.open:
+                with ecos_tab:
+                    _render_ecos_charts(session)
+            if latest_tab.open:
+                with latest_tab:
+                    _render_all_latest(session)
+            if history_tab.open:
+                with history_tab:
+                    _render_collection_history(session)
     finally:
         engine.dispose()

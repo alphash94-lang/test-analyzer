@@ -4,7 +4,7 @@ import streamlit as st
 
 from app.config import Settings
 from app.models.status import ConnectionState, ConnectionStatusItem
-from app.services.connection_status import get_connection_statuses
+from app.ui.connection_status import cached_connection_statuses
 
 _STATE_ICON = {
     ConnectionState.CONNECTED: "🟢",
@@ -18,13 +18,15 @@ _STATE_ICON = {
 
 def _render_status_card(item: ConnectionStatusItem) -> None:
     with st.container(border=True):
-        provider_column, status_column = st.columns([3, 2])
-        with provider_column:
+        with st.container(
+            horizontal=True,
+            horizontal_alignment="distribute",
+            vertical_alignment="center",
+        ):
             st.subheader(item.provider)
-            st.caption(item.detail)
-        with status_column:
             st.markdown(f"### {_STATE_ICON[item.state]} {item.state.value}")
-            st.caption(f"점검시각 {item.checked_at.strftime('%Y-%m-%d %H:%M:%S KST')}")
+        st.caption(item.detail)
+        st.caption(f"점검시각 {item.checked_at.strftime('%Y-%m-%d %H:%M:%S KST')}")
 
 
 def render_data_status(settings: Settings) -> None:
@@ -41,7 +43,7 @@ def render_data_status(settings: Settings) -> None:
         "시장 스냅샷을 함께 확인한 뒤 추천종목 화면에 표시합니다."
     )
 
-    statuses = get_connection_statuses(settings)
+    statuses = cached_connection_statuses(settings)
     for item in statuses:
         _render_status_card(item)
 

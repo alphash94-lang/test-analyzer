@@ -20,15 +20,24 @@ class IndexRepository:
         as_of_at: datetime,
         collected_at: datetime,
     ) -> int:
-        stored = 0
-        for item in records:
-            row = session.scalar(
+        if not records:
+            return 0
+
+        index_names = {item.index_name for item in records}
+        trade_dates = {item.trade_date for item in records}
+        existing_rows = {
+            (row.index_name, row.trade_date): row
+            for row in session.scalars(
                 select(IndexDaily).where(
-                    IndexDaily.index_name == item.index_name,
-                    IndexDaily.trade_date == item.trade_date,
+                    IndexDaily.index_name.in_(index_names),
+                    IndexDaily.trade_date.in_(trade_dates),
                     IndexDaily.source_provider == "KRX",
                 )
-            )
+            ).all()
+        }
+        stored = 0
+        for item in records:
+            row = existing_rows.get((item.index_name, item.trade_date))
             if row is None:
                 row = IndexDaily(
                     index_name=item.index_name,
@@ -39,6 +48,7 @@ class IndexRepository:
                     collected_at=collected_at,
                 )
                 session.add(row)
+                existing_rows[(item.index_name, item.trade_date)] = row
             row.index_class = item.index_class
             row.close = item.close
             row.previous_day_change = item.previous_day_change

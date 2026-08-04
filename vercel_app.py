@@ -53,7 +53,9 @@ async def bootstrap(request: Request) -> JSONResponse:
 
     from scripts.bootstrap_vercel import bootstrap as run_bootstrap
 
-    provider = request.query_params.get("provider")
+    provider = request.query_params.get("step") or request.query_params.get(
+        "provider"
+    )
     try:
         result = await asyncio.to_thread(run_bootstrap, provider=provider)
     except ValueError as exc:

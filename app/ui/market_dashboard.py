@@ -18,7 +18,6 @@ from app.models.metadata import DataState
 from app.models.realtime_market import RealtimeMarketSnapshot
 from app.models.status import ConnectionState
 from app.repositories.market_analysis_repository import MarketAnalysisRepository
-from app.services.connection_status import get_connection_statuses
 from app.services.market_regime_service import MarketRegimeService
 from app.services.phase3_data_service import Phase3DataService
 from app.services.realtime_market_service import (
@@ -27,6 +26,7 @@ from app.services.realtime_market_service import (
     refresh_realtime_stock_overlay,
     start_realtime_collector,
 )
+from app.ui.connection_status import cached_connection_statuses
 from app.utils.dates import now_kst, restore_database_kst
 
 _REGIME_LABELS = {
@@ -669,7 +669,7 @@ def render_market_dashboard(settings: Settings) -> None:
             if snapshot is None:
                 krx = next(
                     status
-                    for status in get_connection_statuses(settings)
+                    for status in cached_connection_statuses(settings)
                     if status.provider == "KRX"
                 )
                 st.warning(
@@ -795,7 +795,7 @@ def render_market_dashboard(settings: Settings) -> None:
                     },
                 )
                 relevant = {"KRX", "OpenDART", "한국투자증권"}
-                for connection in get_connection_statuses(settings):
+                for connection in cached_connection_statuses(settings):
                     if connection.provider not in relevant:
                         continue
                     anomalies.append(

@@ -26,7 +26,6 @@ from app.models.stock import (
     StockQualityState,
     StockSearchResult,
 )
-from app.services.connection_status import get_connection_statuses
 from app.services.entry_readiness_service import (
     EntryReadiness,
     EntryReadinessService,
@@ -42,6 +41,7 @@ from app.services.valuation_data_service import (
     ValuationDataService,
     ValuationReference,
 )
+from app.ui.connection_status import cached_connection_statuses
 from app.utils.dates import now_kst
 from app.utils.technical_indicators import AdjustedPricePoint
 
@@ -2044,7 +2044,7 @@ def render_stock_search(settings: Settings) -> None:
     )
     dart_status = next(
         item
-        for item in get_connection_statuses(settings)
+        for item in cached_connection_statuses(settings)
         if item.provider == "OpenDART"
     )
     dart_message = f"OpenDART: {dart_status.state.value} · {dart_status.detail}"

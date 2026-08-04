@@ -41,8 +41,18 @@ from app.providers.naver_news import (
     NaverNewsProvider,
 )
 from app.repositories.raw_response_repository import RawResponseRepository
+from app.services.phase3_data_service import Phase3DataService
 from app.utils.dates import now_kst
-from scripts import update_ecos_macro
+from scripts import (
+    update_daily_index,
+    update_daily_prices,
+    update_ecos_macro,
+    update_market_screening_data,
+    update_phase3_inputs,
+    update_phase3_market,
+    update_phase4_recommendations,
+    update_stock_master,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -153,6 +163,24 @@ async def _verify_naver(settings: Settings) -> int:
     )
 
 
+async def _refresh_phase3_window(
+    settings: Settings,
+    as_of: date,
+    *,
+    offset_days: int,
+) -> int:
+    service = Phase3DataService(settings)
+    try:
+        summary = await service.refresh_window(
+            as_of_date=as_of,
+            offset_days=offset_days,
+            calendar_days=5 if offset_days < 120 else 30,
+        )
+    finally:
+        service.close()
+    return 0 if summary.state == DataState.AVAILABLE else 1
+
+
 async def _run_steps(
     as_of: date,
     *,
@@ -160,7 +188,7 @@ async def _run_steps(
 ) -> list[dict[str, Any]]:
     settings = get_settings()
     ecos_start = as_of - timedelta(days=30)
-    steps = (
+    verification_steps = (
         BootstrapStep("krx", lambda: _verify_krx(settings, as_of)),
         BootstrapStep("opendart", lambda: _verify_opendart(settings)),
         BootstrapStep("kis", lambda: _verify_kis(settings)),
@@ -177,8 +205,37 @@ async def _run_steps(
             ),
         ),
     )
-    selected_steps = steps if only is None else tuple(
-        step for step in steps if step.name == only
+    normalized_steps = (
+        BootstrapStep("universe", lambda: update_stock_master._run(as_of)),
+        BootstrapStep("prices", lambda: update_daily_prices._run(as_of)),
+        BootstrapStep("index", lambda: update_daily_index._run(as_of)),
+        BootstrapStep("phase3-inputs", lambda: update_phase3_inputs._run(as_of)),
+        BootstrapStep(
+            "phase3-market",
+            lambda: asyncio.to_thread(update_phase3_market._run, as_of),
+        ),
+        BootstrapStep(
+            "screening",
+            lambda: update_market_screening_data._run(as_of),
+        ),
+        BootstrapStep(
+            "recommendations",
+            lambda: asyncio.to_thread(update_phase4_recommendations._run, as_of),
+        ),
+    ) + tuple(
+        BootstrapStep(
+            f"phase3-window-{offset_days}",
+            lambda offset_days=offset_days: _refresh_phase3_window(
+                settings,
+                as_of,
+                offset_days=offset_days,
+            ),
+        )
+        for offset_days in (*range(0, 120, 5), *range(120, 390, 30))
+    )
+    all_steps = verification_steps + normalized_steps
+    selected_steps = verification_steps if only is None else tuple(
+        step for step in all_steps if step.name == only
     )
     if not selected_steps:
         raise ValueError(f"unknown bootstrap provider: {only}")
@@ -206,7 +263,7 @@ async def _run_steps(
 
 
 def bootstrap(*, provider: str | None = None) -> dict[str, Any]:
-    """Initialize the schema and persist a lightweight real provider attempt."""
+    """Initialize the schema and run one bounded verification or data step."""
 
     alembic_config = Config(PROJECT_ROOT / "alembic.ini")
     command.upgrade(alembic_config, "head")
