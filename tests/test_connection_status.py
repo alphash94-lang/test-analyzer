@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -9,8 +9,8 @@ from app.config import Settings
 from app.db.models.quality import ApiRawResponse
 from app.db.session import create_db_engine, create_session_factory
 from app.models.status import ConnectionState
-from app.services.connection_status import get_connection_statuses
-from app.utils.dates import now_kst
+from app.services.connection_status import _business_elapsed, get_connection_statuses
+from app.utils.dates import SEOUL, now_kst
 from tests.helpers import make_settings, migrate_database
 
 
@@ -18,6 +18,13 @@ def as_mapping(settings: Settings) -> dict[str, ConnectionState]:
     return {
         item.provider: item.state for item in get_connection_statuses(settings)
     }
+
+
+def test_business_elapsed_excludes_weekend() -> None:
+    start = datetime(2026, 7, 31, 18, tzinfo=SEOUL)
+    end = datetime(2026, 8, 4, 15, tzinfo=SEOUL)
+
+    assert _business_elapsed(start, end) == timedelta(hours=45)
 
 
 def test_no_keys_show_no_connected_external_provider(
