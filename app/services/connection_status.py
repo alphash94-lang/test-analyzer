@@ -65,6 +65,39 @@ class ProviderAttempt:
     http_status: int | None
 
 
+def _business_elapsed(start: datetime, end: datetime) -> timedelta:
+    """Return elapsed time excluding Saturdays and Sundays."""
+
+    if end <= start:
+        return timedelta(0)
+    elapsed = timedelta(0)
+    cursor = start
+    while cursor.date() < end.date():
+        next_midnight = (cursor + timedelta(days=1)).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        if cursor.weekday() < 5:
+            elapsed += next_midnight - cursor
+        cursor = next_midnight
+    if cursor.weekday() < 5:
+        elapsed += end - cursor
+    return elapsed
+
+
+def _is_stale(
+    received_at: datetime,
+    checked_at: datetime,
+    *,
+    freshness_warning_hours: int,
+) -> bool:
+    return _business_elapsed(received_at, checked_at) > timedelta(
+        hours=freshness_warning_hours
+    )
+
+
 def _has_value(secret: SecretStr | None) -> bool:
     return bool(secret and secret.get_secret_value().strip())
 
@@ -92,8 +125,10 @@ def _credential_status(
         and 200 <= latest_attempt.http_status <= 299
     ):
         received_at = restore_database_kst(latest_attempt.received_at)
-        is_stale = checked_at - received_at > timedelta(
-            hours=freshness_warning_hours
+        is_stale = _is_stale(
+            received_at,
+            checked_at,
+            freshness_warning_hours=freshness_warning_hours,
         )
         return ConnectionStatusItem(
             provider=provider,
@@ -261,8 +296,10 @@ def _public_provider_status(
         and latest_attempt.http_status is not None
         and 200 <= latest_attempt.http_status <= 299
     ):
-        stale = checked_at - received_at > timedelta(
-            hours=freshness_warning_hours
+        stale = _is_stale(
+            received_at,
+            checked_at,
+            freshness_warning_hours=freshness_warning_hours,
         )
         return ConnectionStatusItem(
             provider=provider,
