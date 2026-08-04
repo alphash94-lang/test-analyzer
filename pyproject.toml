@@ -17,7 +17,7 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "python-dotenv>=1.0,<2",
     "sqlalchemy>=2.0,<3",
-    "streamlit>=1.40,<2",
+    "streamlit>=1.60,<2",
     "tzdata>=2025.2",
     "websockets>=15,<17",
 ]
@@ -35,3 +35,6 @@ include = ["app*", "scripts*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+
+[tool.vercel]
+entrypoint = "vercel_app:app"

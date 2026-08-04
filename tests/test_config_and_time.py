@@ -33,6 +33,16 @@ def test_blank_env_file_values_do_not_override_safe_defaults(
     assert settings.database_url == "sqlite:///./data/kospi_analyzer.db"
 
 
+def test_postgres_database_url_uses_installed_psycopg_driver() -> None:
+    settings = make_settings(
+        database_url="postgresql://user:password@example.com/app?sslmode=require"
+    )
+
+    assert settings.database_url == (
+        "postgresql+psycopg://user:password@example.com/app?sslmode=require"
+    )
+
+
 def test_now_kst_is_timezone_aware() -> None:
     current = now_kst()
 

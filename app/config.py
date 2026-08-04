@@ -4,7 +4,7 @@ from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, PositiveFloat, SecretStr
+from pydantic import Field, PositiveFloat, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -287,6 +287,19 @@ class Settings(BaseSettings):
     ecos_api_key: SecretStr | None = None
 
     db_pool_pre_ping: bool = Field(default=True)
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def use_psycopg_v3_for_postgres(cls, value: object) -> object:
+        """Normalize provider-issued Postgres URLs to the installed driver."""
+
+        if not isinstance(value, str):
+            return value
+        if value.startswith("postgres://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgres://")
+        if value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+        return value
 
 
 @lru_cache(maxsize=1)
