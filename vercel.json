@@ -4,7 +4,7 @@
   "functions": {
     "vercel_app.py": {
       "maxDuration": 300,
-      "excludeFiles": "{tests/**,docs/**,migrations/**,scripts/**,data/**,.venv/**,.pytest_cache/**}"
+      "excludeFiles": "{tests/**,docs/**,data/**,.venv/**,.pytest_cache/**}"
     }
   }
 }
