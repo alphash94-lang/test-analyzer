@@ -28,12 +28,6 @@ def apply_styles() -> None:
             padding-top: 2.8rem;
             padding-bottom: 3rem;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            background: rgba(16, 31, 52, 0.82);
-            border-color: rgba(129, 159, 199, 0.18);
-            border-radius: 16px;
-            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
-        }
         .status-title {
             letter-spacing: -0.03em;
             margin-bottom: 0.15rem;

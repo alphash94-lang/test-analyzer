@@ -544,16 +544,22 @@ def _render_symbol_lookup(settings: Settings) -> None:
             _render_availability(empty_snapshot)
             return
         event_tab, analyst_tab, flow_tab, status_tab = st.tabs(
-            ["공시·뉴스", "애널리스트", "실제 수급", "제공 상태"]
+            ["공시·뉴스", "애널리스트", "실제 수급", "제공 상태"],
+            on_change="rerun",
+            key="event_detail_tabs",
         )
-        with event_tab:
-            _render_events(snapshot)
-        with analyst_tab:
-            _render_analyst(snapshot, settings)
-        with flow_tab:
-            _render_flows(snapshot)
-        with status_tab:
-            _render_availability(snapshot)
+        if event_tab.open:
+            with event_tab:
+                _render_events(snapshot)
+        if analyst_tab.open:
+            with analyst_tab:
+                _render_analyst(snapshot, settings)
+        if flow_tab.open:
+            with flow_tab:
+                _render_flows(snapshot)
+        if status_tab.open:
+            with status_tab:
+                _render_availability(snapshot)
     finally:
         if service is not None:
             service.close()
@@ -570,11 +576,17 @@ def render_events(settings: Settings) -> None:
         "서로 다른 데이터로 표시합니다."
     )
     try:
-        watchlist_tab, lookup_tab = st.tabs(["관심종목", "종목별 조회"])
-        with watchlist_tab:
-            _render_watchlist(settings)
-        with lookup_tab:
-            _render_symbol_lookup(settings)
+        watchlist_tab, lookup_tab = st.tabs(
+            ["관심종목", "종목별 조회"],
+            on_change="rerun",
+            key="events_page_tabs",
+        )
+        if watchlist_tab.open:
+            with watchlist_tab:
+                _render_watchlist(settings)
+        if lookup_tab.open:
+            with lookup_tab:
+                _render_symbol_lookup(settings)
     except (OSError, SQLAlchemyError, ValueError) as exc:
         st.error(f"Phase 5 화면 초기화 실패: {type(exc).__name__}")
         st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")

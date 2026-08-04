@@ -35,12 +35,21 @@ class StockRepository:
         as_of_at: datetime,
         collected_at: datetime,
     ) -> tuple[int, int]:
-        upserted = 0
+        if not records:
+            return 0, 0
+
+        symbols = {classified.item.symbol for classified in records}
+        stocks_by_symbol = {
+            stock.symbol: stock
+            for stock in session.scalars(
+                select(Stock).where(Stock.symbol.in_(symbols))
+            ).all()
+        }
         review_required = 0
         valid_from = as_of_at.date()
         for classified in records:
             item = classified.item
-            stock = session.scalar(select(Stock).where(Stock.symbol == item.symbol))
+            stock = stocks_by_symbol.get(item.symbol)
             if stock is None:
                 stock = Stock(
                     symbol=item.symbol,
@@ -51,6 +60,7 @@ class StockRepository:
                     collected_at=collected_at,
                 )
                 session.add(stock)
+                stocks_by_symbol[item.symbol] = stock
 
             stock.issue_code = item.issue_code
             stock.name_ko = item.name
@@ -77,8 +87,28 @@ class StockRepository:
             stock.as_of_at = as_of_at
             stock.collected_at = collected_at
             stock.data_timing = DataTiming.NOT_APPLICABLE.value
-            session.flush()
 
+        session.flush()
+        stock_ids = [stock.id for stock in stocks_by_symbol.values()]
+        existing_classifications = {
+            (
+                row.stock_id,
+                row.classification_system,
+                row.classification_code,
+                row.valid_from,
+            ): row
+            for row in session.scalars(
+                select(StockClassification).where(
+                    StockClassification.stock_id.in_(stock_ids),
+                    StockClassification.valid_from == valid_from,
+                )
+            ).all()
+            if row.valid_from is not None
+        }
+
+        for classified in records:
+            item = classified.item
+            stock = stocks_by_symbol[item.symbol]
             classifications = {
                 "KRX_MARKET_TYPE": item.market_type_name,
                 "KRX_SECURITY_GROUP": item.security_group_name,
@@ -97,6 +127,7 @@ class StockRepository:
                         valid_from=valid_from,
                         as_of_at=as_of_at,
                         collected_at=collected_at,
+                        existing_rows=existing_classifications,
                     )
 
             if classified.review_reason:
@@ -115,8 +146,7 @@ class StockRepository:
                         "certificate_type_name": item.certificate_type_name,
                     },
                 )
-            upserted += 1
-        return upserted, review_required
+        return len(records), review_required
 
     def apply_dart_codes(
         self,
@@ -219,6 +249,10 @@ class StockRepository:
         flag: str,
         as_of_at: datetime,
         collected_at: datetime,
+        existing_rows: dict[
+            tuple[int, str, str, date], StockClassification
+        ]
+        | None = None,
     ) -> None:
         self._upsert_classification(
             session,
@@ -230,6 +264,7 @@ class StockRepository:
             collected_at=collected_at,
             provider="한국투자증권",
             function_name="KOSPI 종목마스터",
+            existing_rows=existing_rows,
         )
 
     def upsert_kis_industry(
@@ -339,13 +374,22 @@ class StockRepository:
         collected_at: datetime,
         provider: str = "KRX",
         function_name: str = "유가증권 종목기본정보",
+        existing_rows: dict[
+            tuple[int, str, str, date], StockClassification
+        ]
+        | None = None,
     ) -> None:
-        row = session.scalar(
-            select(StockClassification).where(
-                StockClassification.stock_id == stock.id,
-                StockClassification.classification_system == system,
-                StockClassification.classification_code == code,
-                StockClassification.valid_from == valid_from,
+        key = (stock.id, system, code, valid_from)
+        row = (
+            existing_rows.get(key)
+            if existing_rows is not None
+            else session.scalar(
+                select(StockClassification).where(
+                    StockClassification.stock_id == stock.id,
+                    StockClassification.classification_system == system,
+                    StockClassification.classification_code == code,
+                    StockClassification.valid_from == valid_from,
+                )
             )
         )
         if row is None:
@@ -360,6 +404,8 @@ class StockRepository:
                 collected_at=collected_at,
             )
             session.add(row)
+            if existing_rows is not None:
+                existing_rows[key] = row
         row.classification_name = code
         row.source_provider = provider
         row.source_function = function_name

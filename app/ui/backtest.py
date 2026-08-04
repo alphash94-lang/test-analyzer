@@ -9,7 +9,7 @@ from app.config import Settings
 from app.models.backtest import BacktestResult
 from app.models.metadata import DataState
 from app.services.backtest_service import BacktestService
-from app.services.connection_status import get_connection_statuses
+from app.ui.connection_status import cached_connection_statuses
 
 
 def _percent(value: Decimal | None) -> str:
@@ -185,7 +185,7 @@ def render_backtest(settings: Settings) -> None:
             "제출일 기준 재무·정정공시 이력, 검증 수정가격, 확정 현금배당, "
             "KOSPI 벤치마크, 동일 config의 추천 스냅샷."
         )
-        for item in get_connection_statuses(settings):
+        for item in cached_connection_statuses(settings):
             if item.provider in {"KRX", "OpenDART", "한국투자증권"}:
                 st.caption(
                     f"{item.provider} 연결상태: "

@@ -379,19 +379,19 @@ def test_krx_preview_menu_opens_with_truthful_empty_states(
 
     assert not app.exception
     assert "통합 API 데이터 미리보기" in text
-    assert "OpenDART 공시 미리보기" in text
-    assert "KIS 투자의견·수급·공매도" in text
-    assert "네이버 종목 뉴스" in text
-    assert "ECOS 금리·환율 차트" in text
-    assert "전체 데이터 최신 수집 시각" in text
-    assert "종목 기본정보" in text
-    assert "일별 가격" in text
-    assert "KOSPI 지수" in text
-    assert "수집 이력" in text
+    assert [tab.label for tab in app.tabs] == [
+        "종목 기본정보",
+        "일별 가격",
+        "KOSPI 지수",
+        "OpenDART 공시 미리보기",
+        "KIS 투자의견·수급·공매도",
+        "네이버 종목 뉴스",
+        "ECOS 금리·환율 차트",
+        "전체 데이터 최신 수집 시각",
+        "KRX 수집 이력",
+    ]
     assert "조건에 맞는 KRX 종목 기본정보가 없습니다." in text
-    assert "저장된 KRX 일별 가격이 없습니다." in text
-    assert "저장된 KOSPI 지수 데이터가 없습니다." in text
-    assert "저장된 KRX 수집 이력이 없습니다." in text
+    assert "저장된 KRX 일별 가격이 없습니다." not in text
 
 
 def test_market_dashboard_without_inputs_shows_specific_connection_reason(
@@ -516,11 +516,8 @@ def test_phase5_menu_without_keys_shows_specific_reasons_and_no_fake_events(
     assert "공시·뉴스·애널리스트·수급" in text
     assert "관심종목 · 0/50" in text
     assert "등록된 관심종목이 없습니다" in text
-    assert "DART_API_KEY" in text
-    assert "NCP_APIGW_API_KEY_ID" in text
-    assert "KIND" in text
-    assert "공식 공개 API 계약" in text
-    assert "저장된 공식 이벤트가 없습니다" in text
+    assert [tab.label for tab in app.tabs] == ["관심종목", "종목별 조회"]
+    assert "저장된 공식 이벤트가 없습니다" not in text
     assert "자기주식 소각 결정" not in text
     assert "목표주가 100,000원" not in text
 

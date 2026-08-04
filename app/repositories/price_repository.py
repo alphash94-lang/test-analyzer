@@ -32,11 +32,30 @@ class PriceRepository:
         as_of_at: datetime,
         collected_at: datetime,
     ) -> tuple[int, int]:
+        if not records:
+            return 0, 0
+
+        requested_symbols = {item.symbol for item in records}
         stocks_by_symbol: dict[str, Stock] = {}
         for stock in session.scalars(
-            select(Stock).where(Stock.is_active.is_(True))
+            select(Stock).where(
+                Stock.is_active.is_(True),
+                Stock.symbol.in_(requested_symbols),
+            )
         ).all():
             stocks_by_symbol[stock.symbol] = stock
+        stock_ids = [stock.id for stock in stocks_by_symbol.values()]
+        trade_dates = {item.trade_date for item in records}
+        existing_rows = {
+            (row.stock_id, row.trade_date): row
+            for row in session.scalars(
+                select(PriceDaily).where(
+                    PriceDaily.stock_id.in_(stock_ids),
+                    PriceDaily.trade_date.in_(trade_dates),
+                    PriceDaily.source_provider == "KRX",
+                )
+            ).all()
+        }
         stored = 0
         unmatched = 0
         for item in records:
@@ -58,13 +77,7 @@ class PriceRepository:
                     },
                 )
                 continue
-            row = session.scalar(
-                select(PriceDaily).where(
-                    PriceDaily.stock_id == stock.id,
-                    PriceDaily.trade_date == item.trade_date,
-                    PriceDaily.source_provider == "KRX",
-                )
-            )
+            row = existing_rows.get((stock.id, item.trade_date))
             if row is None:
                 row = PriceDaily(
                     stock_id=stock.id,
@@ -75,6 +88,7 @@ class PriceRepository:
                     collected_at=collected_at,
                 )
                 session.add(row)
+                existing_rows[(stock.id, item.trade_date)] = row
             row.currency = None
             row.open_price = item.open_price
             row.high_price = item.high_price

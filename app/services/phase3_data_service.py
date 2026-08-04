@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from sqlalchemy import func, select
 
 from app.config import Settings
-from app.db.models.market import PriceDaily, Stock
+from app.db.models.market import PriceDaily, Stock, StockClassification
 from app.db.models.market_analysis import IndexDaily
 from app.db.session import create_db_engine, create_session_factory
 from app.models.metadata import DataState
@@ -74,67 +74,14 @@ class Phase3DataService:
         candidate = as_of_date
         max_calendar_days = required_index_dates * 2 + 30
         for _ in range(max_calendar_days):
-            has_index = self._has_index(candidate)
-            if not has_index:
-                response = await self._index_provider.fetch(as_of_date=candidate)
-                self._save_raw(
-                    provider="KRX",
-                    function_name=KRX_KOSPI_INDEX_FUNCTION,
-                    endpoint=KRX_KOSPI_INDEX_ENDPOINT,
-                    parameters={"basDd": candidate.strftime("%Y%m%d")},
-                    response=response,
-                )
-                if response.state == DataState.AVAILABLE and response.payload:
-                    with self._sessions.begin() as session:
-                        self._indexes.upsert_krx_records(
-                            session,
-                            response.payload,
-                            as_of_at=(
-                                response.metadata.as_of_at
-                                or response.metadata.collected_at
-                            ),
-                            collected_at=response.metadata.collected_at,
-                        )
-                    has_index = self._has_index(candidate)
-                elif response.state not in {DataState.MISSING}:
-                    errors.append(
-                        response.error_message
-                        or f"{candidate} KRX 지수 조회 실패"
-                    )
+            include_prices = len(trading_dates) < required_price_dates
+            has_index = await self._ensure_history_date(
+                candidate,
+                include_prices=include_prices,
+                errors=errors,
+            )
             if has_index:
                 trading_dates.append(candidate)
-                if len(trading_dates) <= required_price_dates and not (
-                    self._has_continuity_prices(candidate)
-                ):
-                    price_response = await self._price_provider.fetch(
-                        as_of_date=candidate
-                    )
-                    self._save_raw(
-                        provider="KRX",
-                        function_name=KRX_DAILY_PRICE_FUNCTION,
-                        endpoint=KRX_DAILY_PRICE_ENDPOINT,
-                        parameters={"basDd": candidate.strftime("%Y%m%d")},
-                        response=price_response,
-                    )
-                    if (
-                        price_response.state == DataState.AVAILABLE
-                        and price_response.payload
-                    ):
-                        with self._sessions.begin() as session:
-                            self._prices.upsert_krx_records(
-                                session,
-                                price_response.payload,
-                                as_of_at=(
-                                    price_response.metadata.as_of_at
-                                    or price_response.metadata.collected_at
-                                ),
-                                collected_at=price_response.metadata.collected_at,
-                            )
-                    else:
-                        errors.append(
-                            price_response.error_message
-                            or f"{candidate} KRX 종목가격 조회 실패"
-                        )
             if len(trading_dates) >= required_index_dates:
                 break
             candidate -= timedelta(days=1)
@@ -159,6 +106,125 @@ class Phase3DataService:
             errors=tuple(dict.fromkeys(errors)),
         )
 
+    async def refresh_window(
+        self,
+        *,
+        as_of_date: date,
+        offset_days: int,
+        calendar_days: int = 30,
+        recent_price_calendar_days: int = 120,
+    ) -> Phase3DataRefreshSummary:
+        """Persist one bounded calendar window of Phase 3 history."""
+
+        if offset_days < 0:
+            raise ValueError("offset_days must be non-negative")
+        if calendar_days < 1:
+            raise ValueError("calendar_days must be positive")
+
+        classifications = 0
+        errors: list[str] = []
+        if offset_days == 0:
+            classifications, master_errors = await self._refresh_classifications()
+            errors.extend(master_errors)
+
+        trading_dates: list[date] = []
+        price_dates = 0
+        include_prices = offset_days < recent_price_calendar_days
+        candidate = as_of_date - timedelta(days=offset_days)
+        for _ in range(calendar_days):
+            has_index = await self._ensure_history_date(
+                candidate,
+                include_prices=include_prices,
+                errors=errors,
+            )
+            if has_index:
+                trading_dates.append(candidate)
+                if include_prices and self._has_continuity_prices(candidate):
+                    price_dates += 1
+            candidate -= timedelta(days=1)
+
+        state = (
+            DataState.AVAILABLE
+            if trading_dates
+            and (not include_prices or price_dates == len(trading_dates))
+            else DataState.MISSING
+        )
+        return Phase3DataRefreshSummary(
+            state=state,
+            as_of_date=as_of_date,
+            classifications_stored=classifications,
+            index_dates=len(trading_dates),
+            price_dates=price_dates,
+            errors=tuple(dict.fromkeys(errors)),
+        )
+
+    async def _ensure_history_date(
+        self,
+        trade_date: date,
+        *,
+        include_prices: bool,
+        errors: list[str],
+    ) -> bool:
+        has_index = self._has_index(trade_date)
+        if not has_index:
+            response = await self._index_provider.fetch(as_of_date=trade_date)
+            self._save_raw(
+                provider="KRX",
+                function_name=KRX_KOSPI_INDEX_FUNCTION,
+                endpoint=KRX_KOSPI_INDEX_ENDPOINT,
+                parameters={"basDd": trade_date.strftime("%Y%m%d")},
+                response=response,
+            )
+            if response.state == DataState.AVAILABLE and response.payload:
+                with self._sessions.begin() as session:
+                    self._indexes.upsert_krx_records(
+                        session,
+                        response.payload,
+                        as_of_at=(
+                            response.metadata.as_of_at
+                            or response.metadata.collected_at
+                        ),
+                        collected_at=response.metadata.collected_at,
+                    )
+                has_index = self._has_index(trade_date)
+            elif response.state not in {DataState.MISSING}:
+                errors.append(
+                    response.error_message or f"{trade_date} KRX 지수 조회 실패"
+                )
+
+        if (
+            has_index
+            and include_prices
+            and not self._has_continuity_prices(trade_date)
+        ):
+            price_response = await self._price_provider.fetch(
+                as_of_date=trade_date
+            )
+            self._save_raw(
+                provider="KRX",
+                function_name=KRX_DAILY_PRICE_FUNCTION,
+                endpoint=KRX_DAILY_PRICE_ENDPOINT,
+                parameters={"basDd": trade_date.strftime("%Y%m%d")},
+                response=price_response,
+            )
+            if price_response.state == DataState.AVAILABLE and price_response.payload:
+                with self._sessions.begin() as session:
+                    self._prices.upsert_krx_records(
+                        session,
+                        price_response.payload,
+                        as_of_at=(
+                            price_response.metadata.as_of_at
+                            or price_response.metadata.collected_at
+                        ),
+                        collected_at=price_response.metadata.collected_at,
+                    )
+            else:
+                errors.append(
+                    price_response.error_message
+                    or f"{trade_date} KRX 종목가격 조회 실패"
+                )
+        return has_index
+
     async def _refresh_classifications(self) -> tuple[int, list[str]]:
         response = await self._master.fetch()
         self._save_raw(
@@ -179,6 +245,27 @@ class Phase3DataService:
                     select(Stock).where(Stock.is_active.is_(True))
                 ).all()
             }
+            as_of_at = (
+                response.metadata.as_of_at or response.metadata.collected_at
+            )
+            stock_ids = [stock.id for stock in stocks.values()]
+            existing_classifications = {
+                (
+                    row.stock_id,
+                    row.classification_system,
+                    row.classification_code,
+                    row.valid_from,
+                ): row
+                for row in session.scalars(
+                    select(StockClassification).where(
+                        StockClassification.stock_id.in_(stock_ids),
+                        StockClassification.classification_system
+                        == "KIS_SEMICONDUCTOR_FLAG",
+                        StockClassification.valid_from == as_of_at.date(),
+                    )
+                ).all()
+                if row.valid_from is not None
+            }
             stored = 0
             for item in response.payload:
                 stock = stocks.get(item.symbol)
@@ -188,11 +275,9 @@ class Phase3DataService:
                     session,
                     stock=stock,
                     flag=item.semiconductor_flag,
-                    as_of_at=(
-                        response.metadata.as_of_at
-                        or response.metadata.collected_at
-                    ),
+                    as_of_at=as_of_at,
                     collected_at=response.metadata.collected_at,
+                    existing_rows=existing_classifications,
                 )
                 stored += 1
         return stored, []

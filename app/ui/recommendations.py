@@ -14,7 +14,6 @@ from app.models.recommendation import (
     RecommendationDecision,
     RecommendationRunResult,
 )
-from app.services.connection_status import get_connection_statuses
 from app.services.event_service import EventService
 from app.services.integrated_recommendation_service import (
     INTEGRATED_RULE_VERSION,
@@ -25,6 +24,7 @@ from app.services.integrated_recommendation_service import (
 )
 from app.services.recommendation_service import RecommendationService
 from app.services.stock_analysis_service import StockAnalysisService
+from app.ui.connection_status import cached_connection_statuses
 from app.utils.dates import SEOUL, now_kst
 
 _MARKET_REGIME_LABELS = {
@@ -1065,7 +1065,7 @@ def render_recommendations(settings: Settings) -> None:
             st.caption(
                 "공식 입력이 없는 경우 가짜 추천 대신 데이터 부족 사유만 저장됩니다."
             )
-            for item in get_connection_statuses(settings):
+            for item in cached_connection_statuses(settings):
                 if item.provider in {"KRX", "OpenDART", "한국투자증권"}:
                     st.caption(
                         f"{item.provider} 연결상태: {item.state.value} · {item.detail}"
