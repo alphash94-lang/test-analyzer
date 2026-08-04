@@ -103,6 +103,7 @@ class StockRepository:
                     StockClassification.valid_from == valid_from,
                 )
             ).all()
+            if row.valid_from is not None
         }
 
         for classified in records:

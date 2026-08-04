@@ -264,6 +264,7 @@ class Phase3DataService:
                         StockClassification.valid_from == as_of_at.date(),
                     )
                 ).all()
+                if row.valid_from is not None
             }
             stored = 0
             for item in response.payload:
