@@ -4,3 +4,13 @@ gatherUsageStats = false
 [server]
 headless = true
 
+[theme]
+base = "dark"
+primaryColor = "#4C8DFF"
+backgroundColor = "#07111F"
+secondaryBackgroundColor = "#0E1B2E"
+textColor = "#F2F6FF"
+linkColor = "#7DB1FF"
+borderColor = "#273852"
+showWidgetBorder = true
+showSidebarBorder = true
