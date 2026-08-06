@@ -31,6 +31,7 @@ from app.services.entry_readiness_service import (
 )
 from app.services.event_service import EventService
 from app.services.index_service import IndexService
+from app.services.market_status_service import MarketStatusService
 from app.services.phase2_service import Phase2ScoringService
 from app.services.price_service import CurrentStockQuote, PriceService
 from app.services.stock_analysis_service import StockAnalysisService
@@ -2352,6 +2353,8 @@ def render_stock_search(settings: Settings) -> None:
         refresh_progress = st.empty()
         analysis_service = StockAnalysisService(settings)
         price_service = PriceService(settings)
+        status_service = MarketStatusService(settings)
+        event_service = EventService(settings)
 
         async def refresh_selected_data() -> tuple[object, object]:
             financial_summary = await analysis_service.refresh(
@@ -2366,11 +2369,28 @@ def render_stock_search(settings: Settings) -> None:
                 as_of_date=now_kst().date(),
                 lookback_days=120,
             )
-            return financial_summary, price_summary
+            refresh_progress.caption("KIS 가격 이력 수집 완료 · KIND 상태·공시 이벤트 확인 중")
+            status_summary, event_summary = await asyncio.gather(
+                status_service.refresh(
+                    symbol=selected_symbol,
+                    as_of_date=now_kst().date(),
+                ),
+                event_service.refresh(
+                    symbol=selected_symbol,
+                    as_of_date=now_kst().date(),
+                    events_only=True,
+                ),
+            )
+            return financial_summary, price_summary, status_summary, event_summary
 
         try:
             with st.spinner(f"{selected_symbol} Phase 2 빠른 데이터를 수집하는 중입니다..."):
-                financial_summary, price_summary = asyncio.run(
+                (
+                    financial_summary,
+                    price_summary,
+                    status_summary,
+                    event_summary,
+                ) = asyncio.run(
                     refresh_selected_data()
                 )
             _cached_analysis_snapshot.clear()
@@ -2379,7 +2399,9 @@ def render_stock_search(settings: Settings) -> None:
             st.success(
                 f"{selected_symbol} 데이터 갱신 완료 · "
                 f"재무 {financial_summary.statements_stored}건 · "
-                f"조정주가 {price_summary.stored}건"
+                f"조정주가 {price_summary.stored}건 · "
+                f"상태 {status_summary.state.value} · "
+                f"이벤트 {event_summary.state.value}"
             )
             st.rerun()
         except (SQLAlchemyError, OSError, ValueError) as exc:
@@ -2387,6 +2409,8 @@ def render_stock_search(settings: Settings) -> None:
         finally:
             analysis_service.close()
             price_service.close()
+            status_service.close()
+            event_service.close()
     planned_order_amount = default_order_amount
     recalculate_phase2 = False
     if active_analysis_tab == "강제필터·점수":
