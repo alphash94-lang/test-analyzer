@@ -22,6 +22,7 @@ from app.services.integrated_recommendation_service import (
     IntegratedRecommendation,
     IntegratedRecommendationService,
 )
+from app.services.recommendation_job import recommendation_jobs
 from app.services.recommendation_service import RecommendationService
 from app.services.stock_analysis_service import StockAnalysisService
 from app.ui.connection_status import cached_connection_statuses
@@ -1028,13 +1029,41 @@ def render_recommendations(settings: Settings) -> None:
                 "데이터 신뢰도에 별도로 반영합니다."
             )
         if run_requested and settings.app_env == "production":
-            st.info(
-                "전체 KOSPI 추천 계산은 운영 서버의 야간 예약 작업으로 실행됩니다. "
-                "이 화면에서는 저장된 최신 결과만 다시 불러옵니다."
+            requested_at = min(
+                datetime.combine(as_of_date, time.max, tzinfo=SEOUL),
+                now_kst(),
             )
+            started = recommendation_jobs.start(
+                settings,
+                as_of_at=requested_at,
+                profile=profile,
+            )
+            if not started:
+                st.warning("이미 전체 추천 분석이 진행 중입니다.")
             st.rerun()
 
-        if run_requested:
+        job = recommendation_jobs.snapshot()
+        if job.status == "running":
+            progress = job.processed / job.total if job.total else 0.0
+            st.progress(
+                progress,
+                text=(
+                    f"전체 추천 분석 진행 중 · {job.processed}/{job.total} · "
+                    f"{job.symbol}"
+                ),
+            )
+            st.caption("분석은 백그라운드에서 계속 진행되며 화면이 자동 갱신됩니다.")
+            @st.fragment(run_every="5s")
+            def refresh_recommendation_job() -> None:
+                if recommendation_jobs.snapshot().status != "running":
+                    st.rerun()
+
+            refresh_recommendation_job()
+            return
+        elif job.status == "failed":
+            st.error(f"추천 분석에 실패했습니다: {job.error}")
+
+        if run_requested and settings.app_env != "production":
             progress_bar = st.progress(0.0)
             status = st.empty()
 
