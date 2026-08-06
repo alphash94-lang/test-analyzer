@@ -29,8 +29,12 @@ def test_vercel_provider_crons_are_daily_and_bounded() -> None:
         {"path": "/api/cron/naver-daily-2", "schedule": "50 16 * * *"},
         {"path": "/api/cron/naver-daily-3", "schedule": "50 17 * * *"},
         {"path": "/api/cron/naver-daily-4", "schedule": "50 18 * * *"},
-        {"path": "/api/cron/ecos-daily", "schedule": "0 23 * * *"},
-    ]
+            {"path": "/api/cron/ecos-daily", "schedule": "0 23 * * *"},
+            {
+                "path": "/api/cron/recommendations-daily",
+                "schedule": "10 0 * * *",
+            },
+        ]
 
 
 def test_vercel_health_endpoint() -> None:

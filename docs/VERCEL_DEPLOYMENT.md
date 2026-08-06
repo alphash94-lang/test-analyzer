@@ -52,7 +52,7 @@ served at the deployment root.
 
 ## Scheduled provider freshness
 
-`vercel.json` registers four bounded daily Cron Jobs. Vercel schedules are UTC;
+`vercel.json` registers thirteen bounded daily Cron Jobs. Vercel schedules are UTC;
 the corresponding Korea times and work are:
 
 | Path | UTC | KST | Work |
@@ -61,6 +61,7 @@ the corresponding Korea times and work are:
 | `/api/cron/kind-daily-0` … `-4` | 09:40 … 13:40 | 18:40 … 22:40 | KIND market status, 10 watchlist stocks per shard |
 | `/api/cron/naver-daily-0` … `-4` | 14:50 … 18:50 | 23:50 … 03:50 next day | OpenDART and Naver news, 10 watchlist stocks per shard |
 | `/api/cron/ecos-daily` | 23:00 | 08:00 next day | All configured ECOS macro series for the last 30 days |
+| `/api/cron/recommendations-daily` | 00:10 | 09:10 | Full KOSPI recommendation run, outside the interactive Streamlit request |
 
 Vercel supplies `Authorization: Bearer $CRON_SECRET` to configured Cron Jobs.
 The routes reject missing or incorrect credentials. Each scheduled step uses a

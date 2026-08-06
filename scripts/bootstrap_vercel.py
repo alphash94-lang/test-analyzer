@@ -76,7 +76,13 @@ NAVER_SCHEDULED_STEPS = tuple(
     f"naver-daily-{index}" for index in range(WATCHLIST_SHARD_COUNT)
 )
 SCHEDULED_STEPS = frozenset(
-    {"krx-daily", "ecos-daily", *KIND_SCHEDULED_STEPS, *NAVER_SCHEDULED_STEPS}
+    {
+        "krx-daily",
+        "ecos-daily",
+        "recommendations-daily",
+        *KIND_SCHEDULED_STEPS,
+        *NAVER_SCHEDULED_STEPS,
+    }
 )
 _local_schedule_locks = {step: Lock() for step in SCHEDULED_STEPS}
 
@@ -92,6 +98,12 @@ def _previous_weekday(value: date) -> date:
     while candidate.weekday() >= 5:
         candidate -= timedelta(days=1)
     return candidate
+
+
+async def _refresh_recommendations_daily(as_of: date) -> int:
+    """Generate the full recommendation run outside the interactive UI request."""
+
+    return await asyncio.to_thread(update_phase4_recommendations._run, as_of)
 
 
 def _save_raw_attempt(
@@ -305,6 +317,10 @@ async def _run_steps(
         (
             BootstrapStep("krx-daily", lambda: _refresh_krx_daily(as_of)),
             BootstrapStep("ecos-daily", lambda: _refresh_ecos_daily(daily_date)),
+            BootstrapStep(
+                "recommendations-daily",
+                lambda: _refresh_recommendations_daily(daily_date),
+            ),
         )
         + tuple(
             BootstrapStep(

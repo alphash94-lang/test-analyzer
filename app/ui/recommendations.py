@@ -1012,7 +1012,7 @@ def render_recommendations(settings: Settings) -> None:
         with control_right:
             st.write("")
             run_requested = st.button(
-                "KOSPI 전체 다시 분석",
+                "저장된 추천 결과 새로고침",
                 type="primary",
                 width="stretch",
             )
@@ -1027,6 +1027,13 @@ def render_recommendations(settings: Settings) -> None:
                 "공식 값이 없는 항목은 추정값으로 채우지 않고 0점 처리하며, "
                 "데이터 신뢰도에 별도로 반영합니다."
             )
+        if run_requested and settings.app_env == "production":
+            st.info(
+                "전체 KOSPI 추천 계산은 운영 서버의 야간 예약 작업으로 실행됩니다. "
+                "이 화면에서는 저장된 최신 결과만 다시 불러옵니다."
+            )
+            st.rerun()
+
         if run_requested:
             progress_bar = st.progress(0.0)
             status = st.empty()

@@ -69,6 +69,10 @@
     {
       "path": "/api/cron/ecos-daily",
       "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/recommendations-daily",
+      "schedule": "10 0 * * *"
     }
   ],
   "services": {
