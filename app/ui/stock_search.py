@@ -2343,6 +2343,50 @@ def render_stock_search(settings: Settings) -> None:
         "이 화면은 저장된 데이터만 조회합니다. DART·KIS·KIND 수집은 "
         "검색과 분리된 관리 작업에서 실행합니다."
     )
+    refresh_detail_data = st.button(
+        "선택 종목 최신 데이터 수집",
+        help="DART 재무·배당·감사자료와 KIS 조정주가를 선택 종목 기준으로 갱신합니다.",
+        width="stretch",
+    )
+    if refresh_detail_data:
+        refresh_progress = st.empty()
+        analysis_service = StockAnalysisService(settings)
+        price_service = PriceService(settings)
+
+        async def refresh_selected_data() -> tuple[object, object]:
+            financial_summary = await analysis_service.refresh(
+                symbol=selected_symbol,
+                as_of_date=now_kst().date(),
+                years=5,
+                incremental=False,
+            )
+            refresh_progress.caption("DART 재무·배당·감사자료 수집 완료 · KIS 조정주가 수집 중")
+            price_summary = await price_service.refresh_adjusted_history(
+                symbol=selected_symbol,
+                as_of_date=now_kst().date(),
+                lookback_days=420,
+            )
+            return financial_summary, price_summary
+
+        try:
+            with st.spinner(f"{selected_symbol} 선택 종목 데이터를 수집하는 중입니다..."):
+                financial_summary, price_summary = asyncio.run(
+                    refresh_selected_data()
+                )
+            _cached_analysis_snapshot.clear()
+            _cached_phase2_context.clear()
+            _cached_summary_context.clear()
+            st.success(
+                f"{selected_symbol} 데이터 갱신 완료 · "
+                f"재무 {financial_summary.statements_stored}건 · "
+                f"조정주가 {price_summary.stored}건"
+            )
+            st.rerun()
+        except (SQLAlchemyError, OSError, ValueError) as exc:
+            st.error(f"선택 종목 데이터 갱신 실패: {type(exc).__name__}")
+        finally:
+            analysis_service.close()
+            price_service.close()
     planned_order_amount = default_order_amount
     recalculate_phase2 = False
     if active_analysis_tab == "강제필터·점수":
