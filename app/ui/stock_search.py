@@ -2396,6 +2396,15 @@ def render_stock_search(settings: Settings) -> None:
             _cached_analysis_snapshot.clear()
             _cached_phase2_context.clear()
             _cached_summary_context.clear()
+            # 수집 전 저장된 스냅샷이 INSUFFICIENT_DATA였더라도 새 입력을
+            # 저장한 직후 최신 Phase 2 결과로 교체한다. 그렇지 않으면
+            # 사용자가 별도로 "다시 계산"을 눌러야 이전 판정이 남지 않는다.
+            _evaluate_phase2(
+                settings,
+                selected_symbol,
+                Decimal(str(default_order_amount)),
+            )
+            _cached_phase2_context.clear()
             st.success(
                 f"{selected_symbol} 데이터 갱신 완료 · "
                 f"재무 {financial_summary.statements_stored}건 · "
