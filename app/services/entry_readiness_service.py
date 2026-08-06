@@ -5,7 +5,11 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.config import Settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.market_analysis import MarketRegime
 from app.models.metadata import DataState
 from app.repositories.market_analysis_repository import MarketAnalysisRepository
@@ -53,4 +57,4 @@ class EntryReadinessService:
         )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

@@ -10,11 +10,16 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db.models.disclosure import Disclosure
 from app.db.models.market import Stock
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.financial import (
     DartDisclosurePage,
     FinancialRefreshSummary,
     StockAnalysisSnapshot,
+    TechnicalSnapshot,
 )
 from app.models.metadata import DataState, FinancialScope
 from app.providers.base import ApiResponse
@@ -549,30 +554,65 @@ class StockAnalysisService:
             errors=tuple(errors),
         )
 
-    def snapshot(self, symbol: str) -> StockAnalysisSnapshot | None:
+    def snapshot(
+        self,
+        symbol: str,
+        *,
+        sections: tuple[str, ...] | None = None,
+    ) -> StockAnalysisSnapshot | None:
+        """Load only the requested stock-detail sections.
+
+        The default preserves the original complete snapshot contract for
+        callers outside the Streamlit detail screen.
+        """
+
+        default_sections = ("finance", "dividend", "audit", "technical", "source")
+        requested = set(default_sections if sections is None else sections)
+        supported = {"finance", "dividend", "audit", "technical", "source"}
+        unknown = requested - supported
+        if unknown:
+            raise ValueError(
+                "unsupported stock analysis sections: " + ", ".join(sorted(unknown))
+            )
         with self._sessions() as session:
             stock = self._financials.get_stock(session, symbol)
             if stock is None:
                 return None
-            scope, accounts = self._financials.latest_mapped_accounts(
-                session,
-                stock.id,
+            scope = FinancialScope.UNKNOWN
+            accounts = ()
+            financial_history = ()
+            dividends = ()
+            latest_audit = None
+            decisions = ()
+            technical = TechnicalSnapshot(
+                state=DataState.MISSING,
+                error_message="기술지표 탭을 선택하면 수정주가를 조회합니다.",
             )
-            financial_history = self._financials.annual_mapped_account_history(
-                session,
-                stock.id,
-                limit_years=3,
-            )
-            dividends = self._financials.dividend_history(
-                session,
-                stock.id,
-            )
-            latest_audit = self._financials.latest_audit(session, stock.id)
-            decisions = self._disclosures.dividend_decisions(
-                session,
-                stock.id,
-            )
-            history = self._prices.history_for_symbol(session, symbol)
+            if "finance" in requested:
+                scope, accounts = self._financials.latest_mapped_accounts(
+                    session,
+                    stock.id,
+                )
+                financial_history = self._financials.annual_mapped_account_history(
+                    session,
+                    stock.id,
+                    limit_years=3,
+                )
+            if "dividend" in requested:
+                dividends = self._financials.dividend_history(
+                    session,
+                    stock.id,
+                )
+            if "audit" in requested:
+                latest_audit = self._financials.latest_audit(session, stock.id)
+            if "source" in requested:
+                decisions = self._disclosures.dividend_decisions(
+                    session,
+                    stock.id,
+                )
+            if "technical" in requested:
+                history = self._prices.history_for_symbol(session, symbol)
+                technical = calculate_technical_snapshot(history)
         return StockAnalysisSnapshot(
             symbol=symbol,
             financial_scope=scope,
@@ -581,11 +621,11 @@ class StockAnalysisService:
             dividends=dividends,
             latest_audit=latest_audit,
             dividend_decisions=decisions,
-            technical=calculate_technical_snapshot(history),
+            technical=technical,
         )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)
 
     async def _collect_disclosures(
         self,

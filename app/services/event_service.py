@@ -14,7 +14,11 @@ from app.db.models.disclosure import Disclosure
 from app.db.models.event import EventWatchlistItem
 from app.db.models.market import Stock
 from app.db.models.quality import ApiRawResponse
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.events import (
     KisAnalystOpinionItem,
     KisInvestorFlowItem,
@@ -579,7 +583,7 @@ class EventService:
         )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)
 
     async def _collect_disclosures(
         self,

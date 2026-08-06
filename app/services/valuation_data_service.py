@@ -16,7 +16,11 @@ from app.db.models.financial import (
     FinancialStatement,
 )
 from app.db.models.market import PriceDaily, Stock, StockClassification
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.metadata import DataState
 from app.providers.base import ApiResponse
 from app.providers.dart_analysis import (
@@ -759,4 +763,4 @@ class ValuationDataService:
         )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

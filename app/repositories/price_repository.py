@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models.market import PriceDaily, Stock
@@ -127,15 +127,20 @@ class PriceRepository:
         )
         if stock is None:
             raise ValueError(f"active stock not found: {symbol}")
-        stored = 0
-        for item in records:
-            row = session.scalar(
+        trade_dates = {item.trade_date for item in records}
+        existing_rows = {
+            row.trade_date: row
+            for row in session.scalars(
                 select(PriceDaily).where(
                     PriceDaily.stock_id == stock.id,
-                    PriceDaily.trade_date == item.trade_date,
+                    PriceDaily.trade_date.in_(trade_dates),
                     PriceDaily.source_provider == "한국투자증권",
                 )
-            )
+            ).all()
+        }
+        stored = 0
+        for item in records:
+            row = existing_rows.get(item.trade_date)
             if row is None:
                 row = PriceDaily(
                     stock_id=stock.id,
@@ -146,6 +151,7 @@ class PriceRepository:
                     collected_at=collected_at,
                 )
                 session.add(row)
+                existing_rows[item.trade_date] = row
             row.currency = "KRW"
             row.open_price = item.open_price
             row.high_price = item.high_price
@@ -174,15 +180,34 @@ class PriceRepository:
     ) -> dict[str, LatestDailyPrice]:
         if not symbols:
             return {}
-        rows = session.execute(
-            select(Stock.symbol, PriceDaily)
-            .join(PriceDaily, PriceDaily.stock_id == Stock.id)
+        latest_dates = (
+            select(
+                PriceDaily.stock_id.label("stock_id"),
+                func.max(PriceDaily.trade_date).label("trade_date"),
+            )
+            .join(Stock, PriceDaily.stock_id == Stock.id)
             .where(
                 Stock.symbol.in_(symbols),
                 PriceDaily.source_provider == "KRX",
                 PriceDaily.data_state == DataState.AVAILABLE.value,
             )
-            .order_by(Stock.symbol, PriceDaily.trade_date.desc())
+            .group_by(PriceDaily.stock_id)
+            .subquery()
+        )
+        rows = session.execute(
+            select(Stock.symbol, PriceDaily)
+            .join(PriceDaily, PriceDaily.stock_id == Stock.id)
+            .join(
+                latest_dates,
+                (latest_dates.c.stock_id == PriceDaily.stock_id)
+                & (latest_dates.c.trade_date == PriceDaily.trade_date),
+            )
+            .where(
+                Stock.symbol.in_(symbols),
+                PriceDaily.source_provider == "KRX",
+                PriceDaily.data_state == DataState.AVAILABLE.value,
+            )
+            .order_by(Stock.symbol)
         ).all()
         result: dict[str, LatestDailyPrice] = {}
         for symbol, row in rows:
@@ -211,9 +236,29 @@ class PriceRepository:
     ) -> dict[str, LatestDailyPrice]:
         if not symbols:
             return {}
+        latest_dates = (
+            select(
+                PriceDaily.stock_id.label("stock_id"),
+                func.max(PriceDaily.trade_date).label("trade_date"),
+            )
+            .join(Stock, PriceDaily.stock_id == Stock.id)
+            .where(
+                Stock.symbol.in_(symbols),
+                PriceDaily.is_adjusted.is_(True),
+                PriceDaily.adjustment_status == "VERIFIED",
+                PriceDaily.data_state == DataState.AVAILABLE.value,
+            )
+            .group_by(PriceDaily.stock_id)
+            .subquery()
+        )
         rows = session.execute(
             select(Stock.symbol, PriceDaily)
             .join(PriceDaily, PriceDaily.stock_id == Stock.id)
+            .join(
+                latest_dates,
+                (latest_dates.c.stock_id == PriceDaily.stock_id)
+                & (latest_dates.c.trade_date == PriceDaily.trade_date),
+            )
             .where(
                 Stock.symbol.in_(symbols),
                 PriceDaily.is_adjusted.is_(True),
@@ -222,7 +267,6 @@ class PriceRepository:
             )
             .order_by(
                 Stock.symbol,
-                PriceDaily.trade_date.desc(),
                 PriceDaily.collected_at.desc(),
             )
         ).all()

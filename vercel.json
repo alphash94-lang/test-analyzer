@@ -1,10 +1,89 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "regions": ["icn1"],
-  "functions": {
-    "vercel_app.py": {
-      "maxDuration": 300,
-      "excludeFiles": "{tests/**,docs/**,data/**,.venv/**,.pytest_cache/**}"
+  "headers": [
+    {
+      "source": "/static/(.*)",
+      "headers": [
+        {
+          "key": "CDN-Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/favicon.png",
+      "headers": [
+        {
+          "key": "CDN-Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
     }
-  }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/krx-daily",
+      "schedule": "30 22 * * *"
+    },
+    {
+      "path": "/api/cron/kind-daily-0",
+      "schedule": "40 9 * * *"
+    },
+    {
+      "path": "/api/cron/kind-daily-1",
+      "schedule": "40 10 * * *"
+    },
+    {
+      "path": "/api/cron/kind-daily-2",
+      "schedule": "40 11 * * *"
+    },
+    {
+      "path": "/api/cron/kind-daily-3",
+      "schedule": "40 12 * * *"
+    },
+    {
+      "path": "/api/cron/kind-daily-4",
+      "schedule": "40 13 * * *"
+    },
+    {
+      "path": "/api/cron/naver-daily-0",
+      "schedule": "50 14 * * *"
+    },
+    {
+      "path": "/api/cron/naver-daily-1",
+      "schedule": "50 15 * * *"
+    },
+    {
+      "path": "/api/cron/naver-daily-2",
+      "schedule": "50 16 * * *"
+    },
+    {
+      "path": "/api/cron/naver-daily-3",
+      "schedule": "50 17 * * *"
+    },
+    {
+      "path": "/api/cron/naver-daily-4",
+      "schedule": "50 18 * * *"
+    },
+    {
+      "path": "/api/cron/ecos-daily",
+      "schedule": "0 23 * * *"
+    }
+  ],
+  "services": {
+    "web": {
+      "root": ".",
+      "entrypoint": "Dockerfile.vercel",
+      "runtime": "container"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "web"
+      }
+    }
+  ]
 }

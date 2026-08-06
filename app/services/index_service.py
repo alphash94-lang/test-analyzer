@@ -6,7 +6,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.market_analysis import IndexPoint, IndexRefreshSummary
 from app.models.metadata import DataState
 from app.providers.base import ApiResponse
@@ -97,7 +101,7 @@ class IndexService:
             )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)
 
     def _save_raw(
         self,

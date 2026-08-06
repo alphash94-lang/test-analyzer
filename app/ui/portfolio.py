@@ -243,8 +243,8 @@ def render_portfolio(settings: Settings) -> None:
                 else:
                     st.error("저장된 실제 종목 또는 포트폴리오 설정을 찾지 못했습니다.")
 
-        positions = service.positions()
         latest = service.latest()
+        positions = service.positions(latest=latest)
         by_symbol = (
             {item.symbol: item for item in latest.recommendations}
             if latest is not None

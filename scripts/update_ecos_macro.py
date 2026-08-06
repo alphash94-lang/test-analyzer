@@ -9,7 +9,11 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.logging_config import configure_logging, safe_exception_message
 from app.models.metadata import DataState
 from app.providers.ecos import (
@@ -113,7 +117,7 @@ async def _run(arguments: argparse.Namespace) -> int:
                 }
             )
     finally:
-        engine.dispose()
+        dispose_db_engine(engine)
 
     states = {result["state"] for result in results}
     overall = (

@@ -392,14 +392,30 @@ class RecommendationRepository:
             .where(Recommendation.recommendation_run_id == run.id)
             .order_by(Recommendation.rank, Recommendation.id)
         ).all()
+        stocks_by_id = {
+            stock.id: stock
+            for stock in session.scalars(
+                select(Stock).where(
+                    Stock.id.in_({row.stock_id for row in rows})
+                )
+            ).all()
+        }
+        plans_by_recommendation_id = {
+            plan.recommendation_id: plan
+            for plan in session.scalars(
+                select(SplitBuyPlan).where(
+                    SplitBuyPlan.recommendation_id.in_(
+                        {row.id for row in rows}
+                    )
+                )
+            ).all()
+        }
         decisions: list[RecommendationDecision] = []
         for row in rows:
-            stock = session.get(Stock, row.stock_id)
+            stock = stocks_by_id.get(row.stock_id)
             if stock is None:
                 raise RuntimeError("recommendation refers to a missing stock")
-            plan_row = session.scalar(
-                select(SplitBuyPlan).where(SplitBuyPlan.recommendation_id == row.id)
-            )
+            plan_row = plans_by_recommendation_id.get(row.id)
             plan = (
                 SplitBuyPlanResult(
                     status=SplitBuyStatus(plan_row.status),

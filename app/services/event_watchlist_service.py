@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.repositories.event_watchlist_repository import (
     EventWatchlistRepository,
     WatchlistStock,
@@ -42,4 +46,4 @@ class EventWatchlistService:
             )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

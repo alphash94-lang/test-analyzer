@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from itertools import pairwise
 
@@ -18,7 +18,6 @@ from app.models.metadata import DataState
 from app.models.price import LatestDailyPrice
 from app.models.recommendation import RecommendationDecision
 from app.models.scoring import FilterState, Phase2Result
-from app.models.status import ConnectionState
 from app.models.stock import (
     ListingStatus,
     ProductType,
@@ -32,7 +31,6 @@ from app.services.entry_readiness_service import (
 )
 from app.services.event_service import EventService
 from app.services.index_service import IndexService
-from app.services.market_status_service import MarketStatusService
 from app.services.phase2_service import Phase2ScoringService
 from app.services.price_service import CurrentStockQuote, PriceService
 from app.services.stock_analysis_service import StockAnalysisService
@@ -41,7 +39,6 @@ from app.services.valuation_data_service import (
     ValuationDataService,
     ValuationReference,
 )
-from app.ui.connection_status import cached_connection_statuses
 from app.utils.dates import now_kst
 from app.utils.technical_indicators import AdjustedPricePoint
 
@@ -254,7 +251,145 @@ def _load_current_quote(
 ) -> CurrentStockQuote | None:
     service = PriceService(_settings)
     try:
-        return asyncio.run(service.current_quote_for_symbol(symbol))
+        return asyncio.run(
+            asyncio.wait_for(
+                service.current_quote_for_symbol(symbol),
+                timeout=4.0,
+            )
+        )
+    except TimeoutError:
+        return None
+    finally:
+        service.close()
+
+
+@st.cache_data(ttl=300, max_entries=8, show_spinner=False)
+def _cached_stock_count(
+    database_url: str,
+    _settings: Settings,
+) -> int:
+    del database_url
+    service = UniverseService(_settings)
+    try:
+        return service.stock_count()
+    finally:
+        service.close()
+
+
+@st.cache_data(ttl=60, max_entries=200, show_spinner=False)
+def _cached_stock_search(
+    database_url: str,
+    _settings: Settings,
+    query: str,
+) -> tuple[
+    list[StockSearchResult],
+    dict[str, LatestDailyPrice],
+    dict[str, LatestDailyPrice],
+]:
+    del database_url
+    universe_service = UniverseService(_settings)
+    price_service: PriceService | None = None
+    try:
+        results = universe_service.search(query)
+        if not results:
+            return [], {}, {}
+        price_service = PriceService(_settings)
+        symbols = [item.symbol for item in results]
+        return (
+            results,
+            price_service.latest_for_symbols(symbols),
+            price_service.latest_adjusted_for_symbols(symbols),
+        )
+    finally:
+        universe_service.close()
+        if price_service is not None:
+            price_service.close()
+
+
+@st.cache_data(ttl=300, max_entries=200, show_spinner=False)
+def _cached_analysis_snapshot(
+    database_url: str,
+    _settings: Settings,
+    symbol: str,
+    sections: tuple[str, ...],
+) -> StockAnalysisSnapshot | None:
+    del database_url
+    service = StockAnalysisService(_settings)
+    try:
+        return service.snapshot(symbol, sections=sections)
+    finally:
+        service.close()
+
+
+@st.cache_data(ttl=300, max_entries=200, show_spinner=False)
+def _cached_phase2_context(
+    database_url: str,
+    _settings: Settings,
+    symbol: str,
+) -> tuple[Phase2Result | None, EntryReadiness | None]:
+    del database_url
+    scoring_service = Phase2ScoringService(_settings)
+    entry_service = EntryReadinessService(_settings)
+    try:
+        result = scoring_service.latest(symbol)
+        entry = entry_service.latest(
+            result.individual_entry_score if result is not None else None
+        )
+        return result, entry
+    finally:
+        scoring_service.close()
+        entry_service.close()
+
+
+@st.cache_data(ttl=300, max_entries=100, show_spinner=False)
+def _cached_summary_context(
+    database_url: str,
+    _settings: Settings,
+    symbol: str,
+) -> tuple[
+    StockAnalysisSnapshot | None,
+    list[AdjustedPricePoint],
+    Phase5Snapshot | None,
+    list[IndexPoint],
+    ValuationReference | None,
+]:
+    del database_url
+    analysis_service = StockAnalysisService(_settings)
+    price_service = PriceService(_settings)
+    event_service = EventService(_settings)
+    index_service = IndexService(_settings)
+    valuation_service = ValuationDataService(_settings)
+    try:
+        return (
+            analysis_service.snapshot(symbol),
+            price_service.history_for_symbol(symbol, limit=260),
+            event_service.snapshot(symbol),
+            index_service.history(index_name="코스피", limit=100),
+            valuation_service.reference_for_symbol(
+                symbol,
+                as_of_date=now_kst().date(),
+            ),
+        )
+    finally:
+        analysis_service.close()
+        price_service.close()
+        event_service.close()
+        index_service.close()
+        valuation_service.close()
+
+
+def _evaluate_phase2(
+    settings: Settings,
+    symbol: str,
+    planned_order_amount: Decimal,
+) -> Phase2Result:
+    service = Phase2ScoringService(settings)
+    try:
+        return service.evaluate(
+            symbol,
+            as_of_at=now_kst(),
+            planned_order_amount=planned_order_amount,
+        )
     finally:
         service.close()
 
@@ -275,44 +410,6 @@ def _latest_financial_value(
     latest = max(candidates, key=lambda item: item.business_year)
     assert latest.value is not None
     return latest.business_year, latest.value
-
-
-def _stock_detail_needs_refresh(
-    snapshot: StockAnalysisSnapshot | None,
-    price_history: Sequence[AdjustedPricePoint],
-    *,
-    as_of_date: date | None = None,
-) -> bool:
-    financial_needed, price_needed = _stock_detail_refresh_needs(
-        snapshot,
-        price_history,
-        as_of_date=as_of_date or now_kst().date(),
-    )
-    return financial_needed or price_needed
-
-
-def _stock_detail_refresh_needs(
-    snapshot: StockAnalysisSnapshot | None,
-    price_history: Sequence[AdjustedPricePoint],
-    *,
-    as_of_date: date,
-) -> tuple[bool, bool]:
-    financial_years = {
-        item.business_year
-        for item in (snapshot.financial_history if snapshot is not None else ())
-        if item.value is not None
-    }
-    financial_needed = snapshot is None or len(financial_years) < 3
-    latest_price_date = max(
-        (item.trade_date for item in price_history),
-        default=None,
-    )
-    price_needed = (
-        len(price_history) < 126
-        or latest_price_date is None
-        or latest_price_date < as_of_date - timedelta(days=7)
-    )
-    return financial_needed, price_needed
 
 
 def _render_business_summary(
@@ -959,7 +1056,7 @@ def _render_dividend_overview(
     )
 
 
-@st.fragment(run_every=300)
+@st.fragment
 def _render_stock_price_panel(
     settings: Settings,
     stock: StockSearchResult,
@@ -977,7 +1074,7 @@ def _render_stock_price_panel(
         st.caption(
             f"{stock.market_name or 'KOSPI'} · "
             f"{stock.official_product_name or _PRODUCT_LABELS[stock.product_type]} · "
-            "5분 갱신 현재가"
+            "저장 종가 · 요청 시 5분 갱신 현재가"
         )
         st.markdown(f"## {stock.name} · {stock.symbol}")
     with refresh_column:
@@ -986,9 +1083,21 @@ def _render_stock_price_panel(
             width="stretch",
             key=f"refresh-current-quote-{stock.symbol}",
         )
+    quote_state_key = f"current-quote-{stock.symbol}"
+    stored_quote = st.session_state.get(quote_state_key)
+    current_quote = (
+        stored_quote if isinstance(stored_quote, CurrentStockQuote) else None
+    )
     if refresh_quote:
         _load_current_quote.clear()
-    current_quote = _load_current_quote(settings, stock.symbol)
+        refreshed_quote = _load_current_quote(settings, stock.symbol)
+        if refreshed_quote is not None:
+            current_quote = refreshed_quote
+            st.session_state[quote_state_key] = refreshed_quote
+        elif refresh_quote:
+            st.warning(
+                "KIS 현재가 조회가 지연되거나 실패해 저장된 최근 종가를 표시합니다."
+            )
 
     confirmed_history = sorted(history, key=lambda item: item.trade_date)
     ordered = list(confirmed_history)
@@ -1279,16 +1388,10 @@ def _render_recommendation_event_context(item: RecommendationDecision) -> None:
         )
         return
 
-    positive = tuple(
-        row for row in evidences if row.get("sentiment") == "POSITIVE"
-    )
-    negative = tuple(
-        row for row in evidences if row.get("sentiment") == "NEGATIVE"
-    )
+    positive = tuple(row for row in evidences if row.get("sentiment") == "POSITIVE")
+    negative = tuple(row for row in evidences if row.get("sentiment") == "NEGATIVE")
     news_count = int(str(item.raw_metrics.get("detail_news_article_count") or 0))
-    disclosure_count = int(
-        str(item.raw_metrics.get("detail_disclosure_count") or 0)
-    )
+    disclosure_count = int(str(item.raw_metrics.get("detail_disclosure_count") or 0))
     st.markdown("#### 뉴스·공시 호재·악재")
     st.caption(
         f"선택 당시 최근 90일 네이버 뉴스 {news_count}건 · "
@@ -1369,11 +1472,7 @@ def _render_recommendation_context(
         metrics[0].metric("추천 판정", item.category_label)
         metrics[1].metric(
             detail_score_label,
-            (
-                f"{detail_score}/100"
-                if detail_score is not None
-                else "계산 불가"
-            ),
+            (f"{detail_score}/100" if detail_score is not None else "계산 불가"),
         )
         metrics[2].metric(
             f"진입준비도 ({entry_threshold}점↑ 권장)",
@@ -1556,7 +1655,7 @@ def _render_phase2_score(
                 "코드": item.code,
                 "판정": item.state.value,
                 "원시값": (
-                    item.raw_value
+                    str(item.raw_value)
                     if item.raw_value is not None
                     else item.raw_text or "확인 불가"
                 ),
@@ -1580,7 +1679,7 @@ def _render_phase2_score(
                     "구성요소": item.code,
                     "상태": item.state.value,
                     "원시값": (
-                        item.raw_value
+                        str(item.raw_value)
                         if item.raw_value is not None
                         else item.raw_text or "확인 불가"
                     ),
@@ -1641,380 +1740,395 @@ def _render_analysis_tabs(
             "감사",
             "기술지표·진입시점",
             "공시·원자료",
-        ]
+        ],
+        key=f"stock-detail-analysis-tab-{snapshot.symbol}",
+        on_change="rerun",
     )
-    with summary_tab:
-        st.write(
-            "재무 범위:",
-            {
-                "CFS": "연결재무제표",
-                "OFS": "별도재무제표",
-                "UNKNOWN": "확인 불가",
-            }.get(snapshot.financial_scope.value, "확인 불가"),
-        )
-        st.write(
-            "최근 감사의견:",
-            (
-                snapshot.latest_audit.opinion or "확인 불가"
-                if snapshot.latest_audit is not None
-                else "데이터 연결 필요"
-            ),
-        )
-        st.write(
-            "수정가격 확인:",
-            (
-                "확인됨"
-                if snapshot.technical.state == DataState.AVAILABLE
-                else "확인 불가"
-            ),
-        )
-        st.write(
-            "Phase 2 판정:",
-            _format_phase2_decision(phase2_result),
-        )
-
-    with score_tab:
-        _render_phase2_score(phase2_result, entry_readiness)
-
-    with dividend_tab:
-        if not snapshot.dividends:
-            st.warning("OpenDART 최근 5개 사업연도 확정 DPS 데이터가 없습니다.")
-        else:
-            ordered_dividends = sorted(
-                snapshot.dividends,
-                key=lambda item: (
-                    item.business_year,
-                    _DIVIDEND_PERIOD_RANK.get(item.dividend_type or "", 0),
-                ),
-                reverse=True,
+    if summary_tab.open:
+        with summary_tab:
+            st.write(
+                "재무 범위:",
+                {
+                    "CFS": "연결재무제표",
+                    "OFS": "별도재무제표",
+                    "UNKNOWN": "확인 불가",
+                }.get(snapshot.financial_scope.value, "확인 불가"),
             )
-            annual_dividends = [
-                item
-                for item in ordered_dividends
-                if item.dividend_type in {"CASH_DPS", "CASH_DPS_ANNUAL"}
-            ]
-            latest_annual = annual_dividends[0] if annual_dividends else None
-            last_year = now_kst().year - 1
-            last_year_dividend = next(
-                (item for item in annual_dividends if item.business_year == last_year),
-                None,
-            )
-            interim_dividend = next(
+            st.write(
+                "최근 감사의견:",
                 (
+                    snapshot.latest_audit.opinion or "확인 불가"
+                    if snapshot.latest_audit is not None
+                    else "데이터 연결 필요"
+                ),
+            )
+            st.write(
+                "수정가격 확인:",
+                (
+                    "확인됨"
+                    if snapshot.technical.state == DataState.AVAILABLE
+                    else "확인 불가"
+                ),
+            )
+            st.write(
+                "Phase 2 판정:",
+                _format_phase2_decision(phase2_result),
+            )
+
+    if score_tab.open:
+        with score_tab:
+            _render_phase2_score(phase2_result, entry_readiness)
+
+    if dividend_tab.open:
+        with dividend_tab:
+            if not snapshot.dividends:
+                st.warning("OpenDART 최근 5개 사업연도 확정 DPS 데이터가 없습니다.")
+            else:
+                ordered_dividends = sorted(
+                    snapshot.dividends,
+                    key=lambda item: (
+                        item.business_year,
+                        _DIVIDEND_PERIOD_RANK.get(item.dividend_type or "", 0),
+                    ),
+                    reverse=True,
+                )
+                annual_dividends = [
                     item
                     for item in ordered_dividends
-                    if item.dividend_type
-                    in {"CASH_DPS_Q1", "CASH_DPS_H1", "CASH_DPS_Q3"}
-                    and item.dps is not None
-                    and item.dps > 0
-                ),
-                None,
-            )
-            metric_columns = st.columns(4)
-            metric_columns[0].metric(
-                "최근 확정 연간 주당배당금",
-                (
-                    _format_value(latest_annual.dps, latest_annual.currency)
-                    if latest_annual is not None
-                    else "확인 불가"
-                ),
-            )
-            metric_columns[1].metric(
-                "최신 연간 DPS 기준 배당률",
-                _format_dividend_yield(
-                    latest_annual.dps if latest_annual is not None else None,
-                    latest_price,
-                ),
-            )
-            metric_columns[2].metric(
-                "배당 주기",
-                _dividend_frequency(snapshot.dividends),
-            )
-            metric_columns[3].metric(
-                f"{last_year}년 주당배당금",
-                (
-                    _format_value(
-                        last_year_dividend.dps,
-                        last_year_dividend.currency,
-                    )
-                    if last_year_dividend is not None
-                    else "확인 불가"
-                ),
-            )
-            if latest_price is not None:
-                st.caption(
-                    "배당률은 최신 확정 연간 DPS를 "
-                    f"{latest_price.trade_date.isoformat()} 종가 "
-                    f"{latest_price.close_price:,.0f}원으로 나눈 단순 배당률입니다."
-                )
-            if interim_dividend is not None:
-                st.info(
-                    f"{interim_dividend.business_year}년 "
-                    f"{_DIVIDEND_PERIOD_LABELS.get(interim_dividend.dividend_type or '', '중간')} "
-                    "주당배당금: "
-                    f"{_format_value(interim_dividend.dps, interim_dividend.currency)}"
-                )
-            st.dataframe(
-                [
-                    {
-                        "지급 사업연도": item.business_year,
-                        "보고 구분": _DIVIDEND_PERIOD_LABELS.get(
-                            item.dividend_type or "",
-                            "확인 불가",
-                        ),
-                        "주식종류": item.stock_kind or "확인 불가",
-                        "누적 주당 현금배당금": _format_value(
-                            item.dps,
-                            item.currency,
-                        ),
-                        "현재 주가 기준 단순 배당률": _format_dividend_yield(
-                            item.dps,
-                            latest_price,
-                        ),
-                        "현금배당 총액": _format_value(
-                            item.total_amount,
-                            item.currency,
-                        ),
-                        "공시 접수일": _format_date(item.filing_date),
-                        "확정·추정": (
-                            "확정"
-                            if item.is_confirmed is True and item.is_estimate is False
-                            else "확인 불가"
-                        ),
-                        "출처": "OpenDART 배당에 관한 사항",
-                        "원문": item.source_url or "확인 불가",
-                    }
-                    for item in ordered_dividends
-                ],
-                width="stretch",
-                hide_index=True,
-            )
-
-    with finance_tab:
-        if not snapshot.financial_accounts:
-            st.warning("OpenDART 재무제표 데이터가 없습니다.")
-        else:
-            st.dataframe(
-                [
-                    {
-                        "지표": item.metric_code,
-                        "원 계정명": item.account_name,
-                        "당기값": _format_value(item.value, item.currency),
-                        "누적값": _format_value(
-                            item.cumulative_value,
-                            item.currency,
-                        ),
-                        "TTM": _format_value(item.ttm_value, item.currency),
-                        "연결·별도": item.fs_div.value,
-                        "사업연도": item.business_year,
-                        "보고서코드": item.report_code,
-                        "보고서 제출일": item.filing_date.isoformat(),
-                        "접수번호": item.receipt_no,
-                        "계산 구분": (item.calculation_source or "공식 원자료"),
-                        "원문": item.source_url or "확인 불가",
-                    }
-                    for item in snapshot.financial_accounts
-                ],
-                width="stretch",
-                hide_index=True,
-            )
-            st.caption(
-                "계정 매핑 실패값은 0으로 바꾸지 않습니다. TTM은 공식 "
-                "당기·누적·전기누적 값이 모두 있을 때만 자체 계산합니다."
-            )
-        annual_history = [
-            item
-            for item in snapshot.financial_history
-            if item.currency == "KRW"
-            and item.value is not None
-            and item.metric_code in {code for code, _ in _FINANCIAL_COMPARISON_METRICS}
-        ]
-        if annual_history:
-            st.subheader("최근 3개년 재무 비교")
-            st.caption("사업보고서 연간 확정값 · 연결재무제표 우선 · 단위 억원")
-            years = sorted({item.business_year for item in annual_history})
-            values_by_key = {
-                (item.metric_code, item.business_year): item.value
-                for item in annual_history
-            }
-            comparison_rows = []
-            available_metrics: list[tuple[str, str]] = []
-            for metric_code, metric_label in _FINANCIAL_COMPARISON_METRICS:
-                metric_values = {
-                    year: values_by_key.get((metric_code, year)) for year in years
-                }
-                if not any(value is not None for value in metric_values.values()):
-                    continue
-                available_metrics.append((metric_code, metric_label))
-                comparison_rows.append(
-                    {
-                        "지표": metric_label,
-                        **{
-                            str(year): (
-                                float(
-                                    (value / Decimal(100_000_000)).quantize(
-                                        Decimal("0.01")
-                                    )
-                                )
-                                if value is not None
-                                else None
-                            )
-                            for year, value in metric_values.items()
-                        },
-                    }
-                )
-            st.dataframe(
-                comparison_rows,
-                width="stretch",
-                hide_index=True,
-            )
-            metric_labels = {
-                metric_label: metric_code
-                for metric_code, metric_label in available_metrics
-            }
-            selected_metric_label = st.selectbox(
-                "추이 그래프 지표",
-                options=list(metric_labels),
-                key=f"financial-history-metric-{snapshot.symbol}",
-            )
-            selected_metric_code = metric_labels[selected_metric_label]
-            selected_values = {
-                year: value
-                for year in years
-                if (value := values_by_key.get((selected_metric_code, year)))
-                is not None
-            }
-            graph_modes = (
-                [
-                    "첫해=100 변화지수",
-                    "전년 대비 증감률(%)",
-                    "실제 금액(억원)",
+                    if item.dividend_type in {"CASH_DPS", "CASH_DPS_ANNUAL"}
                 ]
-                if selected_values
-                and all(value > 0 for value in selected_values.values())
-                else ["실제 금액(억원)"]
-            )
-            graph_mode = st.radio(
-                "그래프 표시 방식",
-                options=graph_modes,
-                horizontal=True,
-                key=f"financial-history-mode-{snapshot.symbol}",
-            )
-            chart_rows, y_axis_title = _financial_chart_rows(
-                selected_values,
-                graph_mode,
-            )
-            chart_data = alt.Data(values=chart_rows)
-            base_chart = alt.Chart(chart_data).encode(
-                x=alt.X(
-                    "사업연도:O",
-                    title=None,
-                    sort=[str(row["사업연도"]) for row in chart_rows],
-                    axis=alt.Axis(
-                        labelAngle=0,
-                        labelOverlap=False,
-                        labelPadding=8,
+                latest_annual = annual_dividends[0] if annual_dividends else None
+                last_year = now_kst().year - 1
+                last_year_dividend = next(
+                    (
+                        item
+                        for item in annual_dividends
+                        if item.business_year == last_year
                     ),
-                ),
-                y=alt.Y(
-                    "값:Q",
-                    title=y_axis_title,
-                    scale=alt.Scale(zero=False, padding=20),
-                ),
-                tooltip=[
-                    alt.Tooltip("사업연도:O"),
-                    alt.Tooltip(
+                    None,
+                )
+                interim_dividend = next(
+                    (
+                        item
+                        for item in ordered_dividends
+                        if item.dividend_type
+                        in {"CASH_DPS_Q1", "CASH_DPS_H1", "CASH_DPS_Q3"}
+                        and item.dps is not None
+                        and item.dps > 0
+                    ),
+                    None,
+                )
+                metric_columns = st.columns(4)
+                metric_columns[0].metric(
+                    "최근 확정 연간 주당배당금",
+                    (
+                        _format_value(latest_annual.dps, latest_annual.currency)
+                        if latest_annual is not None
+                        else "확인 불가"
+                    ),
+                )
+                metric_columns[1].metric(
+                    "최신 연간 DPS 기준 배당률",
+                    _format_dividend_yield(
+                        latest_annual.dps if latest_annual is not None else None,
+                        latest_price,
+                    ),
+                )
+                metric_columns[2].metric(
+                    "배당 주기",
+                    _dividend_frequency(snapshot.dividends),
+                )
+                metric_columns[3].metric(
+                    f"{last_year}년 주당배당금",
+                    (
+                        _format_value(
+                            last_year_dividend.dps,
+                            last_year_dividend.currency,
+                        )
+                        if last_year_dividend is not None
+                        else "확인 불가"
+                    ),
+                )
+                if latest_price is not None:
+                    st.caption(
+                        "배당률은 최신 확정 연간 DPS를 "
+                        f"{latest_price.trade_date.isoformat()} 종가 "
+                        f"{latest_price.close_price:,.0f}원으로 나눈 단순 배당률입니다."
+                    )
+                if interim_dividend is not None:
+                    st.info(
+                        f"{interim_dividend.business_year}년 "
+                        f"{_DIVIDEND_PERIOD_LABELS.get(interim_dividend.dividend_type or '', '중간')} "
+                        "주당배당금: "
+                        f"{_format_value(interim_dividend.dps, interim_dividend.currency)}"
+                    )
+                st.dataframe(
+                    [
+                        {
+                            "지급 사업연도": item.business_year,
+                            "보고 구분": _DIVIDEND_PERIOD_LABELS.get(
+                                item.dividend_type or "",
+                                "확인 불가",
+                            ),
+                            "주식종류": item.stock_kind or "확인 불가",
+                            "누적 주당 현금배당금": _format_value(
+                                item.dps,
+                                item.currency,
+                            ),
+                            "현재 주가 기준 단순 배당률": _format_dividend_yield(
+                                item.dps,
+                                latest_price,
+                            ),
+                            "현금배당 총액": _format_value(
+                                item.total_amount,
+                                item.currency,
+                            ),
+                            "공시 접수일": _format_date(item.filing_date),
+                            "확정·추정": (
+                                "확정"
+                                if item.is_confirmed is True
+                                and item.is_estimate is False
+                                else "확인 불가"
+                            ),
+                            "출처": "OpenDART 배당에 관한 사항",
+                            "원문": item.source_url or "확인 불가",
+                        }
+                        for item in ordered_dividends
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    if finance_tab.open:
+        with finance_tab:
+            if not snapshot.financial_accounts:
+                st.warning("OpenDART 재무제표 데이터가 없습니다.")
+            else:
+                st.dataframe(
+                    [
+                        {
+                            "지표": item.metric_code,
+                            "원 계정명": item.account_name,
+                            "당기값": _format_value(item.value, item.currency),
+                            "누적값": _format_value(
+                                item.cumulative_value,
+                                item.currency,
+                            ),
+                            "TTM": _format_value(item.ttm_value, item.currency),
+                            "연결·별도": item.fs_div.value,
+                            "사업연도": item.business_year,
+                            "보고서코드": item.report_code,
+                            "보고서 제출일": item.filing_date.isoformat(),
+                            "접수번호": item.receipt_no,
+                            "계산 구분": (item.calculation_source or "공식 원자료"),
+                            "원문": item.source_url or "확인 불가",
+                        }
+                        for item in snapshot.financial_accounts
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    "계정 매핑 실패값은 0으로 바꾸지 않습니다. TTM은 공식 "
+                    "당기·누적·전기누적 값이 모두 있을 때만 자체 계산합니다."
+                )
+            annual_history = [
+                item
+                for item in snapshot.financial_history
+                if item.currency == "KRW"
+                and item.value is not None
+                and item.metric_code
+                in {code for code, _ in _FINANCIAL_COMPARISON_METRICS}
+            ]
+            if annual_history:
+                st.subheader("최근 3개년 재무 비교")
+                st.caption("사업보고서 연간 확정값 · 연결재무제표 우선 · 단위 억원")
+                years = sorted({item.business_year for item in annual_history})
+                values_by_key = {
+                    (item.metric_code, item.business_year): item.value
+                    for item in annual_history
+                }
+                comparison_rows = []
+                available_metrics: list[tuple[str, str]] = []
+                for metric_code, metric_label in _FINANCIAL_COMPARISON_METRICS:
+                    metric_values = {
+                        year: values_by_key.get((metric_code, year)) for year in years
+                    }
+                    if not any(value is not None for value in metric_values.values()):
+                        continue
+                    available_metrics.append((metric_code, metric_label))
+                    comparison_rows.append(
+                        {
+                            "지표": metric_label,
+                            **{
+                                str(year): (
+                                    float(
+                                        (value / Decimal(100_000_000)).quantize(
+                                            Decimal("0.01")
+                                        )
+                                    )
+                                    if value is not None
+                                    else None
+                                )
+                                for year, value in metric_values.items()
+                            },
+                        }
+                    )
+                st.dataframe(
+                    comparison_rows,
+                    width="stretch",
+                    hide_index=True,
+                )
+                metric_labels = {
+                    metric_label: metric_code
+                    for metric_code, metric_label in available_metrics
+                }
+                selected_metric_label = st.selectbox(
+                    "추이 그래프 지표",
+                    options=list(metric_labels),
+                    key=f"financial-history-metric-{snapshot.symbol}",
+                )
+                selected_metric_code = metric_labels[selected_metric_label]
+                selected_values = {
+                    year: value
+                    for year in years
+                    if (value := values_by_key.get((selected_metric_code, year)))
+                    is not None
+                }
+                graph_modes = (
+                    [
+                        "첫해=100 변화지수",
+                        "전년 대비 증감률(%)",
+                        "실제 금액(억원)",
+                    ]
+                    if selected_values
+                    and all(value > 0 for value in selected_values.values())
+                    else ["실제 금액(억원)"]
+                )
+                graph_mode = st.radio(
+                    "그래프 표시 방식",
+                    options=graph_modes,
+                    horizontal=True,
+                    key=f"financial-history-mode-{snapshot.symbol}",
+                )
+                chart_rows, y_axis_title = _financial_chart_rows(
+                    selected_values,
+                    graph_mode,
+                )
+                chart_data = alt.Data(values=chart_rows)
+                base_chart = alt.Chart(chart_data).encode(
+                    x=alt.X(
+                        "사업연도:O",
+                        title=None,
+                        sort=[str(row["사업연도"]) for row in chart_rows],
+                        axis=alt.Axis(
+                            labelAngle=0,
+                            labelOverlap=False,
+                            labelPadding=8,
+                        ),
+                    ),
+                    y=alt.Y(
                         "값:Q",
                         title=y_axis_title,
-                        format=",.2f",
+                        scale=alt.Scale(zero=False, padding=20),
                     ),
-                ],
-            )
-            trend_line = base_chart.mark_line(point=True, strokeWidth=3)
-            value_labels = base_chart.mark_text(
-                dy=-14,
-                fontSize=12,
-            ).encode(text=alt.Text("값:Q", format=",.2f"))
-            st.altair_chart(
-                (trend_line + value_labels).properties(
-                    height=320,
-                    title=f"{selected_metric_label} 3개년 추이",
-                ),
-                width="stretch",
-            )
-        else:
-            st.info("최근 3개년 연간 재무 비교 데이터가 없습니다.")
+                    tooltip=[
+                        alt.Tooltip("사업연도:O"),
+                        alt.Tooltip(
+                            "값:Q",
+                            title=y_axis_title,
+                            format=",.2f",
+                        ),
+                    ],
+                )
+                trend_line = base_chart.mark_line(point=True, strokeWidth=3)
+                value_labels = base_chart.mark_text(
+                    dy=-14,
+                    fontSize=12,
+                ).encode(text=alt.Text("값:Q", format=",.2f"))
+                st.altair_chart(
+                    (trend_line + value_labels).properties(
+                        height=320,
+                        title=f"{selected_metric_label} 3개년 추이",
+                    ),
+                    width="stretch",
+                )
+            else:
+                st.info("최근 3개년 연간 재무 비교 데이터가 없습니다.")
 
-    with audit_tab:
-        audit = snapshot.latest_audit
-        if audit is None:
-            st.warning("최신 감사의견 데이터가 없습니다.")
-        else:
-            st.write("감사의견:", audit.opinion or "확인 불가")
-            st.write("감사인:", audit.auditor or "확인 불가")
-            st.write("대상 사업연도:", audit.business_year)
-            st.write("보고서 제출일:", _format_date(audit.filing_date))
-            st.write("접수번호:", audit.receipt_no)
-            st.write(
-                "계속기업 불확실성:",
-                _format_going_concern(
-                    audit.going_concern_status,
-                    audit.going_concern_risk,
-                ),
-            )
-            st.write("강조사항 확인 상태:", audit.emphasis_status)
-            if audit.emphasis_matter:
-                st.text(audit.emphasis_matter)
-            st.write("원문:", audit.source_url or "확인 불가")
+    if audit_tab.open:
+        with audit_tab:
+            audit = snapshot.latest_audit
+            if audit is None:
+                st.warning("최신 감사의견 데이터가 없습니다.")
+            else:
+                st.write("감사의견:", audit.opinion or "확인 불가")
+                st.write("감사인:", audit.auditor or "확인 불가")
+                st.write("대상 사업연도:", audit.business_year)
+                st.write("보고서 제출일:", _format_date(audit.filing_date))
+                st.write("접수번호:", audit.receipt_no)
+                st.write(
+                    "계속기업 불확실성:",
+                    _format_going_concern(
+                        audit.going_concern_status,
+                        audit.going_concern_risk,
+                    ),
+                )
+                st.write("강조사항 확인 상태:", audit.emphasis_status)
+                if audit.emphasis_matter:
+                    st.text(audit.emphasis_matter)
+                st.write("원문:", audit.source_url or "확인 불가")
 
-    with technical_tab:
-        technical = snapshot.technical
-        if technical.state != DataState.AVAILABLE:
-            st.warning(
-                technical.error_message
-                or "수정가격 확인이 없어 기술지표를 계산할 수 없습니다."
-            )
-        else:
-            st.dataframe(
-                [
-                    {"지표": "Wilder RSI 14", "값": technical.rsi_14},
-                    {"지표": "SMA 20", "값": technical.sma_20},
-                    {"지표": "SMA 60", "값": technical.sma_60},
-                    {"지표": "SMA 120", "값": technical.sma_120},
-                    {"지표": "SMA 200", "값": technical.sma_200},
-                    {"지표": "ATR 14", "값": technical.atr_14},
-                    {
-                        "지표": "52주 고점 대비 낙폭",
-                        "값": technical.drawdown_52_week,
-                    },
-                ],
-                width="stretch",
-                hide_index=True,
-            )
-            st.caption(
-                f"자체 계산값 · 기준일 {_format_date(technical.as_of_date)} · "
-                f"가격 출처 {technical.price_source or '확인 불가'} · "
-                f"규칙 {technical.rule_version}"
-            )
+    if technical_tab.open:
+        with technical_tab:
+            technical = snapshot.technical
+            if technical.state != DataState.AVAILABLE:
+                st.warning(
+                    technical.error_message
+                    or "수정가격 확인이 없어 기술지표를 계산할 수 없습니다."
+                )
+            else:
+                st.dataframe(
+                    [
+                        {"지표": "Wilder RSI 14", "값": technical.rsi_14},
+                        {"지표": "SMA 20", "값": technical.sma_20},
+                        {"지표": "SMA 60", "값": technical.sma_60},
+                        {"지표": "SMA 120", "값": technical.sma_120},
+                        {"지표": "SMA 200", "값": technical.sma_200},
+                        {"지표": "ATR 14", "값": technical.atr_14},
+                        {
+                            "지표": "52주 고점 대비 낙폭",
+                            "값": technical.drawdown_52_week,
+                        },
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
+                st.caption(
+                    f"자체 계산값 · 기준일 {_format_date(technical.as_of_date)} · "
+                    f"가격 출처 {technical.price_source or '확인 불가'} · "
+                    f"규칙 {technical.rule_version}"
+                )
 
-    with source_tab:
-        if not snapshot.dividend_decisions:
-            st.info("현금·현물배당결정 공시가 수집되지 않았습니다.")
-        else:
-            st.dataframe(
-                [
-                    {
-                        "보고서명": item.report_name,
-                        "공시 접수일": item.receipt_date.isoformat(),
-                        "접수번호": item.receipt_no,
-                        "정정 여부": "정정" if item.is_correction else "원공시",
-                        "원문": item.source_url or "확인 불가",
-                    }
-                    for item in snapshot.dividend_decisions
-                ],
-                width="stretch",
-                hide_index=True,
-            )
+    if source_tab.open:
+        with source_tab:
+            if not snapshot.dividend_decisions:
+                st.info("현금·현물배당결정 공시가 수집되지 않았습니다.")
+            else:
+                st.dataframe(
+                    [
+                        {
+                            "보고서명": item.report_name,
+                            "공시 접수일": item.receipt_date.isoformat(),
+                            "접수번호": item.receipt_no,
+                            "정정 여부": "정정" if item.is_correction else "원공시",
+                            "원문": item.source_url or "확인 불가",
+                        }
+                        for item in snapshot.dividend_decisions
+                    ],
+                    width="stretch",
+                    hide_index=True,
+                )
 
 
 def render_stock_search(settings: Settings) -> None:
@@ -2042,21 +2156,10 @@ def render_stock_search(settings: Settings) -> None:
         "KRX 유가증권·코스닥 종목기본정보와 OpenDART 고유번호에 "
         "연결된 종목을 같은 구조로 검색합니다."
     )
-    dart_status = next(
-        item
-        for item in cached_connection_statuses(settings)
-        if item.provider == "OpenDART"
-    )
-    dart_message = f"OpenDART: {dart_status.state.value} · {dart_status.detail}"
-    if dart_status.state == ConnectionState.CONNECTED:
-        st.success(dart_message)
-    elif dart_status.state in {
-        ConnectionState.STALE,
-        ConnectionState.NOT_CONFIGURED,
-    }:
-        st.warning(dart_message)
+    if settings.dart_api_key is None:
+        st.warning("OpenDART: 미설정 · 검색은 저장된 데이터만 사용합니다.")
     else:
-        st.error(dart_message)
+        st.caption("OpenDART: 설정됨 · 종목 검색 중에는 외부 API를 호출하지 않습니다.")
     if recommendation_context is not None:
         query = recommendation_context.symbol
         st.session_state["stock_search_query"] = query
@@ -2065,19 +2168,30 @@ def render_stock_search(settings: Settings) -> None:
             f"({recommendation_context.symbol})"
         )
     else:
-        query = st.text_input(
-            "종목명 또는 6자리 종목코드",
-            placeholder="종목명 또는 6자리 종목코드 입력",
-            key="stock_search_query",
-        ).strip()
+        previous_query = str(st.session_state.get("stock_search_query", ""))
+        with st.form("stock-search-form", border=False):
+            query_input = st.text_input(
+                "종목명 또는 6자리 종목코드",
+                value=previous_query,
+                placeholder="종목명 또는 6자리 종목코드 입력",
+                key="stock_search_input",
+            )
+            search_submitted = st.form_submit_button(
+                "검색",
+                type="primary",
+                width="stretch",
+            )
+        if search_submitted:
+            normalized_query = query_input.strip()
+            if normalized_query != previous_query:
+                st.session_state.pop("stock_detail_selected_label", None)
+            st.session_state["stock_search_query"] = normalized_query
+        query = str(st.session_state.get("stock_search_query", "")).strip()
 
-    service: UniverseService | None = None
-    price_service: PriceService | None = None
     latest_prices: dict[str, LatestDailyPrice] = {}
     dividend_reference_prices: dict[str, LatestDailyPrice] = {}
     try:
-        service = UniverseService(settings)
-        stock_count = service.stock_count()
+        stock_count = _cached_stock_count(settings.database_url, settings)
         if stock_count == 0:
             st.error(
                 "실제 KRX 종목 데이터가 없습니다. "
@@ -2090,23 +2204,15 @@ def render_stock_search(settings: Settings) -> None:
             st.info("검색어를 입력하면 공식 데이터에 저장된 종목만 표시합니다.")
             return
 
-        results = service.search(query)
-        if results:
-            price_service = PriceService(settings)
-            result_symbols = [item.symbol for item in results]
-            latest_prices = price_service.latest_for_symbols(result_symbols)
-            dividend_reference_prices = price_service.latest_adjusted_for_symbols(
-                result_symbols
-            )
+        (
+            results,
+            latest_prices,
+            dividend_reference_prices,
+        ) = _cached_stock_search(settings.database_url, settings, query)
     except (SQLAlchemyError, OSError, ValueError) as exc:
         st.error(f"종목 검색 초기화 실패: {type(exc).__name__}")
         st.caption("DB migration과 DATABASE_URL 설정을 확인하세요.")
         return
-    finally:
-        if service is not None:
-            service.close()
-        if price_service is not None:
-            price_service.close()
 
     if not results:
         st.warning("검색 결과가 없습니다.")
@@ -2204,297 +2310,130 @@ def render_stock_search(settings: Settings) -> None:
             if st.toggle("상세 설명 · 검색 결과 원자료 표시"):
                 st.dataframe(rows, width="stretch", hide_index=True)
             st.caption(
-                "검색 목록은 KRX 확정 일별종가, 상세 화면은 KIS 5분 갱신 현재가를 "
-                "우선 표시합니다. RSI는 검증된 수정주가로만 계산하며 강제필터·점수는 "
+                "검색 목록과 상세 첫 화면은 KRX 확정 일별종가를 즉시 표시하고, "
+                "현재가 갱신 버튼을 누르면 KIS 5분 갱신 현재가를 조회합니다. "
+                "RSI는 검증된 수정주가로만 계산하며 강제필터·점수는 "
                 "계산 결과가 저장된 경우에만 표시합니다."
             )
         labels = {f"{item.name} ({item.symbol})": item.symbol for item in results}
         selected_label = st.selectbox(
             "세부 분석 종목",
             options=list(labels),
+            index=None,
+            placeholder="상세 분석할 종목을 선택하세요",
+            key="stock_detail_selected_label",
         )
+        if selected_label is None:
+            st.caption(
+                "검색 결과를 먼저 표시했습니다. 상세 분석은 종목을 선택할 때만 "
+                "불러옵니다."
+            )
+            return
         selected_symbol = labels[selected_label]
     else:
         selected_symbol = recommendation_context.symbol
     selected_stock = next(item for item in results if item.symbol == selected_symbol)
-    stock_chart_container = st.container()
+    analysis_tab_key = f"stock-detail-analysis-tab-{selected_symbol}"
+    st.session_state.setdefault(analysis_tab_key, "요약")
+    active_analysis_tab = str(st.session_state[analysis_tab_key])
     default_order_amount = int(
         settings.phase2_planned_order_amount_krw or Decimal(1000000)
     )
-    planned_order_amount = st.number_input(
-        "Phase 2 예정 주문금액 (원)",
-        min_value=0,
-        value=default_order_amount,
-        step=100_000,
-        help="유동성 필터의 주문금액 대비 거래대금 비율 계산에 사용합니다.",
+    st.caption(
+        "이 화면은 저장된 데이터만 조회합니다. DART·KIS·KIND 수집은 "
+        "검색과 분리된 관리 작업에서 실행합니다."
     )
-    refresh_column, score_column = st.columns(2)
-    with refresh_column:
-        refresh_official_data = st.button(
-            "선택 종목 공식 데이터 새로고침",
-            width="stretch",
+    planned_order_amount = default_order_amount
+    recalculate_phase2 = False
+    if active_analysis_tab == "강제필터·점수":
+        planned_order_amount = st.number_input(
+            "Phase 2 예정 주문금액 (원)",
+            min_value=0,
+            value=default_order_amount,
+            step=100_000,
+            help="유동성 필터의 주문금액 대비 거래대금 비율 계산에 사용합니다.",
         )
-    with score_column:
         recalculate_phase2 = st.button(
             "선택 종목 Phase 2 다시 계산",
             type="primary",
             width="stretch",
         )
-    analysis_service: StockAnalysisService | None = None
-    scoring_service: Phase2ScoringService | None = None
-    entry_service: EntryReadinessService | None = None
-    chart_price_service: PriceService | None = None
-    detail_event_service: EventService | None = None
-    index_service: IndexService | None = None
+
+    snapshot: StockAnalysisSnapshot | None = None
     phase2_result: Phase2Result | None = None
     entry_readiness: EntryReadiness | None = None
     phase5_snapshot: Phase5Snapshot | None = None
     valuation_reference: ValuationReference | None = None
     price_history: list[AdjustedPricePoint] = []
     index_history: list[IndexPoint] = []
-    auto_refreshed = False
     try:
-        analysis_service = StockAnalysisService(settings)
-        chart_price_service = PriceService(settings)
-        snapshot = analysis_service.snapshot(selected_symbol)
-        price_history = chart_price_service.history_for_symbol(
-            selected_symbol,
-            limit=260,
-        )
-        auto_refresh_key = f"stock-detail-auto-refresh-v2-{selected_symbol}"
-        detail_as_of_date = now_kst().date()
-        financial_needed, price_needed = _stock_detail_refresh_needs(
-            snapshot,
-            price_history,
-            as_of_date=detail_as_of_date,
-        )
-        refresh_financial = (
-            financial_needed
-            and settings.dart_api_key is not None
-            and selected_stock.dart_corp_code is not None
-        )
-        refresh_price = (
-            price_needed
-            and settings.kis_app_key is not None
-            and settings.kis_app_secret is not None
-        )
-        refresh_market_status = recommendation_context is not None
-        should_auto_refresh = (
-            not refresh_official_data
-            and not st.session_state.get(auto_refresh_key, False)
-            and selected_stock.dart_corp_code is not None
-            and (refresh_financial or refresh_price or refresh_market_status)
-        )
-        if should_auto_refresh:
-            st.session_state[auto_refresh_key] = True
-            with st.spinner(
-                "부족한 차트·재무와 KIND 시장상태를 증분 보충하고 있습니다."
-            ):
-                financial_summary = None
-                price_summary = None
-                market_summary = None
-                if refresh_financial:
-                    financial_summary = asyncio.run(
-                        analysis_service.refresh(
-                            symbol=selected_symbol,
-                            as_of_date=detail_as_of_date,
-                            years=3,
-                            incremental=True,
-                        )
-                    )
-                if refresh_price:
-                    latest_price_date = max(
-                        (item.trade_date for item in price_history),
-                        default=None,
-                    )
-                    lookback_days = (
-                        500
-                        if len(price_history) < 126 or latest_price_date is None
-                        else max(
-                            30,
-                            (detail_as_of_date - latest_price_date).days + 14,
-                        )
-                    )
-                    price_summary = asyncio.run(
-                        chart_price_service.refresh_adjusted_history(
-                            symbol=selected_symbol,
-                            as_of_date=detail_as_of_date,
-                            lookback_days=lookback_days,
-                        )
-                    )
-                if refresh_market_status:
-                    market_status_service = MarketStatusService(settings)
-                    try:
-                        market_summary = asyncio.run(
-                            market_status_service.refresh(
-                                symbol=selected_symbol,
-                                as_of_date=detail_as_of_date,
-                            )
-                        )
-                    finally:
-                        market_status_service.close()
-            auto_refreshed = True
-            snapshot = analysis_service.snapshot(selected_symbol)
-            price_history = chart_price_service.history_for_symbol(
+        if active_analysis_tab == "요약":
+            (
+                snapshot,
+                price_history,
+                phase5_snapshot,
+                index_history,
+                valuation_reference,
+            ) = _cached_summary_context(
+                settings.database_url,
+                settings,
                 selected_symbol,
-                limit=260,
             )
-            refreshed_parts: list[str] = []
-            if price_summary is not None:
-                refreshed_parts.append(f"수정주가 {price_summary.stored:,}건")
-            if financial_summary is not None:
-                refreshed_parts.extend(
-                    (
-                        f"재무계정 {financial_summary.accounts_stored:,}건",
-                        f"배당 {financial_summary.dividends_stored:,}건",
-                    )
-                )
-            if market_summary is not None:
-                refreshed_parts.append(
-                    "KIND 시장상태 "
-                    + (
-                        "확인"
-                        if market_summary.state == DataState.AVAILABLE
-                        else "일부 미확인"
-                    )
-                )
-            st.success("상세 데이터 자동 보충 완료 · " + " · ".join(refreshed_parts))
-        if refresh_official_data:
-            with st.spinner("OpenDART 재무·배당·감사 데이터를 수집하고 있습니다."):
-                financial_summary = asyncio.run(
-                    analysis_service.refresh(
-                        symbol=selected_symbol,
-                        as_of_date=now_kst().date(),
-                        years=5,
-                    )
-                )
-            adjusted_price_service = PriceService(settings)
-            try:
-                with st.spinner("KIS 수정주가 일봉을 수집하고 있습니다."):
-                    price_summary = asyncio.run(
-                        adjusted_price_service.refresh_adjusted_history(
-                            symbol=selected_symbol,
-                            as_of_date=now_kst().date(),
-                        )
-                    )
-            finally:
-                adjusted_price_service.close()
-            market_status_service = MarketStatusService(settings)
-            try:
-                with st.spinner("KIND 공식 시장상태를 확인하고 있습니다."):
-                    market_summary = asyncio.run(
-                        market_status_service.refresh(
-                            symbol=selected_symbol,
-                            as_of_date=now_kst().date(),
-                        )
-                    )
-            finally:
-                market_status_service.close()
-            event_service = EventService(settings)
-            try:
-                with st.spinner("OpenDART 중요공시와 기업 이벤트를 갱신하고 있습니다."):
-                    event_summary = asyncio.run(
-                        event_service.refresh(
-                            symbol=selected_symbol,
-                            as_of_date=now_kst().date(),
-                        )
-                    )
-            finally:
-                event_service.close()
-            valuation_service = ValuationDataService(settings)
-            try:
-                with st.spinner(
-                    "KIS·KRX·OpenDART PER/PBR 비교 데이터를 갱신하고 있습니다."
-                ):
-                    valuation_summary = asyncio.run(
-                        valuation_service.refresh(
-                            symbol=selected_symbol,
-                            as_of_date=now_kst().date(),
-                        )
-                    )
-            finally:
-                valuation_service.close()
-            if (
-                financial_summary.state == DataState.AVAILABLE.value
-                and price_summary.state == DataState.AVAILABLE.value
-                and market_summary.state == DataState.AVAILABLE
-                and event_summary.state in {DataState.AVAILABLE, DataState.MISSING}
-                and valuation_summary.state == DataState.AVAILABLE
-            ):
-                st.success(
-                    "공식 데이터 새로고침 완료 · "
-                    f"재무계정 {financial_summary.accounts_stored:,}건 · "
-                    f"감사의견 {financial_summary.audit_opinions_stored:,}건 · "
-                    f"수정주가 {price_summary.stored:,}건 · "
-                    "KIND 시장상태·OpenDART 기업 이벤트·PER/PBR 확인 완료"
-                )
-            else:
-                st.warning(
-                    "일부 공식 데이터가 갱신되지 않았습니다. "
-                    f"OpenDART={financial_summary.state}, "
-                    f"KIS={price_summary.state}, "
-                    f"KIND={market_summary.state.value}, "
-                    f"이벤트={event_summary.state.value}, "
-                    f"밸류에이션={valuation_summary.state.value}"
-                )
-        snapshot = analysis_service.snapshot(selected_symbol)
-        price_history = chart_price_service.history_for_symbol(
-            selected_symbol,
-            limit=260,
-        )
-        detail_event_service = EventService(settings)
-        phase5_snapshot = detail_event_service.snapshot(selected_symbol)
-        index_service = IndexService(settings)
-        index_history = index_service.history(index_name="코스피", limit=100)
-        scoring_service = Phase2ScoringService(settings)
-        phase2_result = scoring_service.latest(selected_symbol)
-        if (
-            recalculate_phase2
-            or refresh_official_data
-            or auto_refreshed
-            or phase2_result is None
-        ):
-            phase2_result = scoring_service.evaluate(
+            phase2_result, _ = _cached_phase2_context(
+                settings.database_url,
+                settings,
                 selected_symbol,
-                as_of_at=now_kst(),
-                planned_order_amount=Decimal(str(planned_order_amount)),
             )
-            if recalculate_phase2 or refresh_official_data or auto_refreshed:
+        elif active_analysis_tab == "강제필터·점수":
+            snapshot = _cached_analysis_snapshot(
+                settings.database_url,
+                settings,
+                selected_symbol,
+                (),
+            )
+            phase2_result, entry_readiness = _cached_phase2_context(
+                settings.database_url,
+                settings,
+                selected_symbol,
+            )
+            if recalculate_phase2 or phase2_result is None:
+                _evaluate_phase2(
+                    settings,
+                    selected_symbol,
+                    Decimal(str(planned_order_amount)),
+                )
+                _cached_phase2_context.clear()
+                _cached_summary_context.clear()
+                phase2_result, entry_readiness = _cached_phase2_context(
+                    settings.database_url,
+                    settings,
+                    selected_symbol,
+                )
+            if recalculate_phase2:
                 st.success(
                     "선택 종목의 Phase 2 결과를 최신 저장 데이터로 계산했습니다."
                 )
-        entry_service = EntryReadinessService(settings)
-        entry_readiness = entry_service.latest(
-            phase2_result.individual_entry_score if phase2_result is not None else None
-        )
-        valuation_reference_service = ValuationDataService(settings)
-        try:
-            valuation_reference = valuation_reference_service.reference_for_symbol(
+        else:
+            section_by_tab = {
+                "배당": ("dividend",),
+                "재무": ("finance",),
+                "감사": ("audit",),
+                "기술지표·진입시점": ("technical",),
+                "공시·원자료": ("source",),
+            }
+            snapshot = _cached_analysis_snapshot(
+                settings.database_url,
+                settings,
                 selected_symbol,
-                as_of_date=now_kst().date(),
+                section_by_tab.get(active_analysis_tab, ()),
             )
-        finally:
-            valuation_reference_service.close()
     except (SQLAlchemyError, OSError, ValueError) as exc:
         st.error(f"종목 분석 조회 실패: {type(exc).__name__}")
         return
-    finally:
-        if analysis_service is not None:
-            analysis_service.close()
-        if scoring_service is not None:
-            scoring_service.close()
-        if entry_service is not None:
-            entry_service.close()
-        if chart_price_service is not None:
-            chart_price_service.close()
-        if detail_event_service is not None:
-            detail_event_service.close()
-        if index_service is not None:
-            index_service.close()
     if snapshot is None:
         st.warning("종목 분석 데이터를 조회할 수 없습니다.")
         return
-    with stock_chart_container:
+    if active_analysis_tab == "요약":
         _render_stock_price_panel(
             settings,
             selected_stock,

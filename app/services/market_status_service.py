@@ -7,7 +7,11 @@ from sqlalchemy import Select, select
 
 from app.config import Settings
 from app.db.models.market import Stock
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.metadata import DataState
 from app.providers.base import ApiResponse
 from app.providers.kind_market_status import (
@@ -175,4 +179,4 @@ class MarketStatusService:
         return select(Stock).where(Stock.symbol == symbol)
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

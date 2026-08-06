@@ -1,0 +1,25 @@
+FROM ghcr.io/astral-sh/uv:0.10.11 AS uv
+
+FROM python:3.14-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
+
+COPY --from=uv /uv /uvx /bin/
+
+WORKDIR /app
+
+# Keep dependency installation in a stable image layer. Application-only
+# changes can then reuse the fully resolved Python environment.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY . .
+RUN uv sync --frozen --no-dev
+
+# Vercel injects PORT for container functions. Streamlit's ASGI wrapper is
+# served directly so HTTP routes and WebSocket sessions share one process.
+CMD ["sh", "-c", "exec /app/.venv/bin/uvicorn vercel_app:app --host 0.0.0.0 --port ${PORT:-80}"]

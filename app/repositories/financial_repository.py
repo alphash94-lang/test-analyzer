@@ -82,15 +82,29 @@ class FinancialRepository:
 
         statements = 0
         accounts = 0
-        for section, section_records in records_by_section.items():
-            first = section_records[0]
-            statement = session.scalar(
+        statement_keys = {
+            (section_records[0].receipt_no, section, scope.value)
+            for section, section_records in records_by_section.items()
+        }
+        existing_statements = {
+            (row.receipt_no, row.statement_kind, row.fs_div): row
+            for row in session.scalars(
                 select(FinancialStatement).where(
-                    FinancialStatement.receipt_no == first.receipt_no,
-                    FinancialStatement.statement_kind == section,
+                    FinancialStatement.receipt_no.in_(
+                        {key[0] for key in statement_keys}
+                    ),
+                    FinancialStatement.statement_kind.in_(
+                        {key[1] for key in statement_keys}
+                    ),
                     FinancialStatement.fs_div == scope.value,
                 )
-            )
+            ).all()
+        } if statement_keys else {}
+        statements_by_section: dict[str, FinancialStatement] = {}
+        for section, section_records in records_by_section.items():
+            first = section_records[0]
+            statement_key = (first.receipt_no, section, scope.value)
+            statement = existing_statements.get(statement_key)
             if statement is None:
                 statement = FinancialStatement(
                     stock_id=stock.id,
@@ -99,6 +113,8 @@ class FinancialRepository:
                     fs_div=scope.value,
                 )
                 session.add(statement)
+                existing_statements[statement_key] = statement
+            statements_by_section[section] = statement
             statement.raw_response_id = raw_response_id
             statement.corp_code = first.corp_code
             statement.original_receipt_no = disclosure.original_receipt_no
@@ -126,12 +142,31 @@ class FinancialRepository:
             statement.as_of_at = None
             statement.collected_at = collected_at
             statement.data_timing = DataTiming.PERIODIC_DISCLOSURE.value
-            session.flush()
             statements += 1
 
+        if statements_by_section:
+            session.flush()
+        statement_ids = {
+            statement.id for statement in statements_by_section.values()
+        }
+        existing_accounts = {
+            (
+                row.statement_id,
+                row.account_id,
+                row.account_name,
+                row.account_detail or "",
+                row.statement_section,
+            ): row
+            for row in session.scalars(
+                select(FinancialAccount).where(
+                    FinancialAccount.statement_id.in_(statement_ids)
+                )
+            ).all()
+        } if statement_ids else {}
+        for section, section_records in records_by_section.items():
+            statement = statements_by_section[section]
             accounts_by_key: dict[
-                tuple[str | None, str, str, str],
-                FinancialAccount,
+                tuple[str | None, str, str, str], FinancialAccount
             ] = {}
             for record in section_records:
                 account_detail = record.account_detail or ""
@@ -143,16 +178,14 @@ class FinancialRepository:
                 )
                 account = accounts_by_key.get(account_key)
                 if account is None:
-                    account = session.scalar(
-                        select(FinancialAccount).where(
-                            FinancialAccount.statement_id == statement.id,
-                            FinancialAccount.account_id == record.account_id,
-                            FinancialAccount.account_name == record.account_name,
-                            FinancialAccount.account_detail == account_detail,
-                            FinancialAccount.statement_section
-                            == record.statement_section,
-                        )
+                    persisted_key = (
+                        statement.id,
+                        record.account_id,
+                        record.account_name,
+                        account_detail,
+                        record.statement_section,
                     )
+                    account = existing_accounts.get(persisted_key)
                     if account is None:
                         account = FinancialAccount(
                             statement_id=statement.id,
@@ -162,6 +195,7 @@ class FinancialRepository:
                             mapping_status="UNMAPPED",
                         )
                         session.add(account)
+                        existing_accounts[persisted_key] = account
                     accounts_by_key[account_key] = account
                     accounts += 1
                 metric_code = map_xbrl_account(
@@ -214,16 +248,20 @@ class FinancialRepository:
                 unique_records[key] = item
         records = list(unique_records.values())
 
-        fact_count = 0
-        for item in records:
-            fact = session.scalar(
+        receipt_numbers = {item.receipt_no for item in records}
+        existing_facts = {
+            (row.receipt_no, row.label, row.stock_kind): row
+            for row in session.scalars(
                 select(DividendFact).where(
                     DividendFact.stock_id == stock.id,
-                    DividendFact.receipt_no == item.receipt_no,
-                    DividendFact.label == item.label,
-                    DividendFact.stock_kind == item.stock_kind,
+                    DividendFact.receipt_no.in_(receipt_numbers),
                 )
-            )
+            ).all()
+        } if receipt_numbers else {}
+        fact_count = 0
+        for item in records:
+            fact_key = (item.receipt_no, item.label, item.stock_kind)
+            fact = existing_facts.get(fact_key)
             if fact is None:
                 fact = DividendFact(
                     stock_id=stock.id,
@@ -232,6 +270,7 @@ class FinancialRepository:
                     stock_kind=item.stock_kind,
                 )
                 session.add(fact)
+                existing_facts[fact_key] = fact
             disclosure = disclosures.get(item.receipt_no)
             parsed_dps = parse_confirmed_dividend_fact(
                 label=item.label,
@@ -273,7 +312,24 @@ class FinancialRepository:
                     None if total is None else total * 1_000_000
                 )
 
+        accepted_types = (
+            ("CASH_DPS", dividend_type)
+            if report_code == "11011"
+            else (dividend_type,)
+        )
+        existing_dividends = {
+            (row.receipt_no, row.stock_kind): row
+            for row in session.scalars(
+                select(Dividend).where(
+                    Dividend.stock_id == stock.id,
+                    Dividend.receipt_no.in_(receipt_numbers),
+                    Dividend.business_year == business_year,
+                    Dividend.dividend_type.in_(accepted_types),
+                )
+            ).all()
+        } if receipt_numbers else {}
         dividend_count = 0
+        processed_dividends: set[tuple[str, str | None]] = set()
         for item in records:
             parsed = parse_confirmed_dividend_fact(
                 label=item.label,
@@ -282,20 +338,8 @@ class FinancialRepository:
             if parsed is None:
                 continue
             dps, currency = parsed
-            accepted_types = (
-                ("CASH_DPS", dividend_type)
-                if report_code == "11011"
-                else (dividend_type,)
-            )
-            dividend = session.scalar(
-                select(Dividend).where(
-                    Dividend.stock_id == stock.id,
-                    Dividend.receipt_no == item.receipt_no,
-                    Dividend.business_year == business_year,
-                    Dividend.stock_kind == item.stock_kind,
-                    Dividend.dividend_type.in_(accepted_types),
-                )
-            )
+            dividend_key = (item.receipt_no, item.stock_kind)
+            dividend = existing_dividends.get(dividend_key)
             if dividend is None:
                 dividend = Dividend(
                     stock_id=stock.id,
@@ -305,6 +349,7 @@ class FinancialRepository:
                     dividend_type=dividend_type,
                 )
                 session.add(dividend)
+                existing_dividends[dividend_key] = dividend
             dividend.dividend_type = dividend_type
             disclosure = disclosures.get(item.receipt_no)
             dividend.original_receipt_no = (
@@ -335,7 +380,9 @@ class FinancialRepository:
             dividend.as_of_at = None
             dividend.collected_at = collected_at
             dividend.data_timing = DataTiming.PERIODIC_DISCLOSURE.value
-            dividend_count += 1
+            if dividend_key not in processed_dividends:
+                processed_dividends.add(dividend_key)
+                dividend_count += 1
         session.flush()
         return fact_count, dividend_count
 

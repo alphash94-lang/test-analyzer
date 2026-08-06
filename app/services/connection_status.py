@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from pydantic import SecretStr
-from sqlalchemy import inspect, select, text
+from sqlalchemy import Engine, func, inspect, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
 from app.db.models.quality import ApiRawResponse
-from app.db.session import create_db_engine
+from app.db.session import create_db_engine, dispose_db_engine
 from app.models.metadata import DataState
 from app.models.status import ConnectionState, ConnectionStatusItem
 from app.utils.dates import now_kst, restore_database_kst
@@ -22,6 +22,7 @@ REQUIRED_TABLES = frozenset(
         "market_status",
         "price_daily",
         "index_daily",
+        "kis_access_tokens",
         "market_regime_snapshots",
         "market_metric_records",
         "market_contribution_records",
@@ -241,15 +242,19 @@ def _ecos_status(
     )
 
 
-def _database_status(settings: Settings) -> ConnectionStatusItem:
+def _database_status(
+    settings: Settings,
+    *,
+    engine: Engine | None = None,
+) -> ConnectionStatusItem:
     checked_at = now_kst()
+    owns_engine = engine is None
+    active_engine = engine or create_db_engine(settings)
     try:
-        engine = create_db_engine(settings)
-        with engine.connect() as connection:
+        with active_engine.connect() as connection:
             connection.execute(text("SELECT 1"))
-        existing_tables = set(inspect(engine).get_table_names())
+            existing_tables = set(inspect(connection).get_table_names())
         missing_tables = REQUIRED_TABLES - existing_tables
-        engine.dispose()
     except (SQLAlchemyError, OSError, ValueError) as exc:
         return ConnectionStatusItem(
             provider="데이터베이스",
@@ -258,6 +263,9 @@ def _database_status(settings: Settings) -> ConnectionStatusItem:
             checked_at=checked_at,
             live_check_performed=True,
         )
+    finally:
+        if owns_engine:
+            dispose_db_engine(active_engine)
 
     if missing_tables:
         return ConnectionStatusItem(
@@ -324,76 +332,96 @@ def _public_provider_status(
 def get_connection_statuses(settings: Settings) -> list[ConnectionStatusItem]:
     """Return truthful configuration states without performing external API calls."""
 
-    latest_attempts = _latest_raw_provider_attempts(settings)
-    return [
-        _credential_status(
-            "KRX",
-            [("KRX_API_KEY", settings.krx_api_key)],
-            latest_attempt=latest_attempts.get("KRX"),
-            freshness_warning_hours=settings.data_freshness_warning_hours,
-        ),
-        _credential_status(
-            "OpenDART",
-            [("DART_API_KEY", settings.dart_api_key)],
-            latest_attempt=latest_attempts.get("OpenDART"),
-            freshness_warning_hours=settings.data_freshness_warning_hours,
-        ),
-        _credential_status(
-            "한국투자증권",
-            [
-                ("KIS_APP_KEY", settings.kis_app_key),
-                ("KIS_APP_SECRET", settings.kis_app_secret),
-            ],
-            latest_attempt=latest_attempts.get("한국투자증권"),
-            freshness_warning_hours=settings.data_freshness_warning_hours,
-        ),
-        _public_provider_status(
-            "KIND",
-            latest_attempt=latest_attempts.get("KIND"),
-            freshness_warning_hours=settings.data_freshness_warning_hours,
-        ),
-        _naver_status(
-            settings,
-            latest_attempt=latest_attempts.get("Naver API HUB"),
-        ),
-        _ecos_status(
-            settings,
-            latest_attempt=latest_attempts.get("ECOS"),
-        ),
-        _database_status(settings),
-    ]
+    engine = create_db_engine(settings)
+    try:
+        # Both checks share one SQLAlchemy pool. On remote Postgres this avoids
+        # paying for two separate TLS/database handshakes on every status load.
+        latest_attempts = _latest_raw_provider_attempts(settings, engine=engine)
+        database_status = _database_status(settings, engine=engine)
+        return [
+            _credential_status(
+                "KRX",
+                [("KRX_API_KEY", settings.krx_api_key)],
+                latest_attempt=latest_attempts.get("KRX"),
+                freshness_warning_hours=settings.data_freshness_warning_hours,
+            ),
+            _credential_status(
+                "OpenDART",
+                [("DART_API_KEY", settings.dart_api_key)],
+                latest_attempt=latest_attempts.get("OpenDART"),
+                freshness_warning_hours=settings.data_freshness_warning_hours,
+            ),
+            _credential_status(
+                "한국투자증권",
+                [
+                    ("KIS_APP_KEY", settings.kis_app_key),
+                    ("KIS_APP_SECRET", settings.kis_app_secret),
+                ],
+                latest_attempt=latest_attempts.get("한국투자증권"),
+                freshness_warning_hours=settings.data_freshness_warning_hours,
+            ),
+            _public_provider_status(
+                "KIND",
+                latest_attempt=latest_attempts.get("KIND"),
+                freshness_warning_hours=settings.data_freshness_warning_hours,
+            ),
+            _naver_status(
+                settings,
+                latest_attempt=latest_attempts.get("Naver API HUB"),
+            ),
+            _ecos_status(
+                settings,
+                latest_attempt=latest_attempts.get("ECOS"),
+            ),
+            database_status,
+        ]
+    finally:
+        dispose_db_engine(engine)
 
 
 def _latest_raw_provider_attempts(
     settings: Settings,
+    *,
+    engine: Engine | None = None,
 ) -> dict[str, ProviderAttempt]:
-    engine = None
+    owns_engine = engine is None
+    active_engine = engine or create_db_engine(settings)
     try:
-        engine = create_db_engine(settings)
-        with engine.connect() as connection:
+        providers = (
+            "KRX",
+            "OpenDART",
+            "Naver API HUB",
+            "한국투자증권",
+            "ECOS",
+            "KIND",
+        )
+        ranked = (
+            select(
+                ApiRawResponse.provider.label("provider"),
+                ApiRawResponse.data_state.label("data_state"),
+                ApiRawResponse.received_at.label("received_at"),
+                ApiRawResponse.http_status.label("http_status"),
+                func.row_number()
+                .over(
+                    partition_by=ApiRawResponse.provider,
+                    order_by=(
+                        ApiRawResponse.received_at.desc(),
+                        ApiRawResponse.id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+            .where(ApiRawResponse.provider.in_(providers))
+            .subquery()
+        )
+        with active_engine.connect() as connection:
             rows = connection.execute(
                 select(
-                    ApiRawResponse.provider,
-                    ApiRawResponse.data_state,
-                    ApiRawResponse.received_at,
-                    ApiRawResponse.http_status,
-                )
-                .where(
-                    ApiRawResponse.provider.in_(
-                        (
-                            "KRX",
-                            "OpenDART",
-                            "Naver API HUB",
-                            "한국투자증권",
-                            "ECOS",
-                            "KIND",
-                        )
-                    )
-                )
-                .order_by(
-                    ApiRawResponse.received_at.desc(),
-                    ApiRawResponse.id.desc(),
-                )
+                    ranked.c.provider,
+                    ranked.c.data_state,
+                    ranked.c.received_at,
+                    ranked.c.http_status,
+                ).where(ranked.c.row_number == 1)
             ).all()
         attempts: dict[str, ProviderAttempt] = {}
         for provider, data_state, received_at, http_status in rows:
@@ -407,5 +435,5 @@ def _latest_raw_provider_attempts(
     except (SQLAlchemyError, OSError, ValueError):
         return {}
     finally:
-        if engine is not None:
-            engine.dispose()
+        if owns_engine:
+            dispose_db_engine(active_engine)

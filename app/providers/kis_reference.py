@@ -34,6 +34,7 @@ from app.models.price import (
 )
 from app.models.status import ConnectionState, ConnectionStatusItem
 from app.providers.base import ApiResponse
+from app.repositories.kis_token_repository import KisTokenRepository
 from app.utils.dates import now_kst
 from app.utils.http import AsyncRateLimiter, request_with_retry
 
@@ -43,19 +44,16 @@ KIS_OPINION_ENDPOINT = (
     f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/invest-opinion"
 )
 KIS_FLOW_ENDPOINT = (
-    f"{KIS_BASE_URL}"
-    "/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
+    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily"
 )
 KIS_PROGRAM_ENDPOINT = (
-    f"{KIS_BASE_URL}"
-    "/uapi/domestic-stock/v1/quotations/comp-program-trade-daily"
+    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/comp-program-trade-daily"
 )
 KIS_SHORT_ENDPOINT = (
     f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/daily-short-sale"
 )
 KIS_ADJUSTED_PRICE_ENDPOINT = (
-    f"{KIS_BASE_URL}"
-    "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 )
 KIS_CURRENT_VALUATION_ENDPOINT = (
     f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
@@ -82,14 +80,16 @@ class KisReferenceProvider:
         self,
         settings: Settings,
         client: httpx.AsyncClient | None = None,
+        token_repository: KisTokenRepository | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
-        self._limiter = AsyncRateLimiter(
-            settings.phase5_kis_requests_per_second
-        )
+        self._limiter = AsyncRateLimiter(settings.phase5_kis_requests_per_second)
         self._access_token: str | None = None
         self._token_expires_at: datetime | None = None
+        self._token_repository = token_repository
+        if self._token_repository is None and client is None:
+            self._token_repository = KisTokenRepository(settings)
 
     @property
     def name(self) -> str:
@@ -327,12 +327,8 @@ class KisReferenceProvider:
             candidates,
             key=lambda item: (int(item[1][:4]), item[0]),
         )
-        eps_raw = performance.payload[_ESTIMATE_EPS_ROW_INDEX].values[
-            period_index
-        ]
-        per_raw = performance.payload[_ESTIMATE_PER_ROW_INDEX].values[
-            period_index
-        ]
+        eps_raw = performance.payload[_ESTIMATE_EPS_ROW_INDEX].values[period_index]
+        per_raw = performance.payload[_ESTIMATE_PER_ROW_INDEX].values[period_index]
         if eps_raw is None or per_raw is None:
             return ApiResponse(
                 state=DataState.MISSING,
@@ -456,9 +452,7 @@ class KisReferenceProvider:
                             collected_at,
                         ),
                         error_code="TOKEN_REFRESH_FAILED",
-                        error_message=(
-                            token_error or "KIS token refresh failed"
-                        ),
+                        error_message=(token_error or "KIS token refresh failed"),
                     )
                 response = await request_with_retry(
                     client,
@@ -604,10 +598,49 @@ class KisReferenceProvider:
             and now_kst() < self._token_expires_at
         ):
             return self._access_token, None
+        if self._token_repository is not None:
+            token, expires_at, error = await self._token_repository.get_or_refresh(
+                app_key=app_key,
+                app_secret=app_secret,
+                refresh=lambda: self._request_token(
+                    client,
+                    app_key=app_key,
+                    app_secret=app_secret,
+                ),
+            )
+            if token is not None and expires_at is not None:
+                self._access_token = token
+                self._token_expires_at = expires_at
+            return token, error
+
         cached = self._load_cached_token(app_key, app_secret)
         if cached is not None:
             self._access_token, self._token_expires_at = cached
             return self._access_token, None
+        token, expires_at, error = await self._request_token(
+            client,
+            app_key=app_key,
+            app_secret=app_secret,
+        )
+        if token is None or expires_at is None:
+            return None, error
+        self._access_token = token
+        self._token_expires_at = expires_at
+        self._save_cached_token(
+            app_key,
+            app_secret,
+            token=token,
+            expires_at=expires_at,
+        )
+        return token, None
+
+    async def _request_token(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        app_key: str,
+        app_secret: str,
+    ) -> tuple[str | None, datetime | None, str | None]:
         try:
             response = await request_with_retry(
                 client,
@@ -627,11 +660,19 @@ class KisReferenceProvider:
                 },
             )
         except httpx.TransportError as exc:
-            return None, f"KIS token request failed: {type(exc).__name__}"
+            return (
+                None,
+                None,
+                f"KIS token request failed: {type(exc).__name__}",
+            )
         if not 200 <= response.status_code <= 299:
-            return None, f"KIS token endpoint returned HTTP {response.status_code}"
+            return (
+                None,
+                None,
+                f"KIS token endpoint returned HTTP {response.status_code}",
+            )
         if len(response.content) > self._settings.max_api_response_bytes:
-            return None, "KIS token response exceeded configured size limit"
+            return None, None, "KIS token response exceeded configured size limit"
         try:
             body = json.loads(response.content)
             if not isinstance(body, dict):
@@ -639,34 +680,37 @@ class KisReferenceProvider:
             token = str(body.get("access_token", "")).strip()
             if not token:
                 raise ValueError
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return None, "KIS token response schema validation failed"
-        expires_in = int(body.get("expires_in", 86400))
+            expires_in = int(body.get("expires_in", 86400))
+        except json.JSONDecodeError, TypeError, ValueError, OverflowError:
+            return None, None, "KIS token response schema validation failed"
         expires_at = now_kst() + timedelta(seconds=max(60, expires_in - 300))
-        self._access_token = token
-        self._token_expires_at = expires_at
-        self._save_cached_token(
-            app_key,
-            app_secret,
-            token=token,
-            expires_at=expires_at,
-        )
-        return token, None
+        return token, expires_at, None
 
     @staticmethod
     def _is_expired_token_response(response: httpx.Response) -> bool:
         try:
             body = json.loads(response.content)
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return False
         return (
-            isinstance(body, dict)
-            and str(body.get("msg_cd", "")).strip() == "EGW00123"
+            isinstance(body, dict) and str(body.get("msg_cd", "")).strip() == "EGW00123"
         )
 
     def _invalidate_token(self) -> None:
+        rejected_token = self._access_token
         self._access_token = None
         self._token_expires_at = None
+        credentials = self._credentials()
+        if (
+            self._token_repository is not None
+            and credentials is not None
+            and rejected_token is not None
+        ):
+            self._token_repository.invalidate(
+                app_key=credentials[0],
+                app_secret=credentials[1],
+                rejected_token=rejected_token,
+            )
         if self._client is not None:
             return
         try:
@@ -695,7 +739,7 @@ class KisReferenceProvider:
             token = str(body["access_token"]).strip()
             expires_at = datetime.fromisoformat(str(body["expires_at"]))
             fingerprint = str(body["credential_fingerprint"])
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except OSError, KeyError, TypeError, ValueError, json.JSONDecodeError:
             return None
         if (
             not token
@@ -759,9 +803,7 @@ class KisReferenceProvider:
         end_date: date,
     ) -> None:
         if not _SYMBOL.fullmatch(symbol):
-            raise ValueError(
-                "KIS symbol must be six uppercase alphanumeric characters"
-            )
+            raise ValueError("KIS symbol must be six uppercase alphanumeric characters")
         if begin_date > end_date:
             raise ValueError("begin_date must not be after end_date")
 

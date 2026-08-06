@@ -5,6 +5,7 @@ from app.db.models.analysis import (
     ScoreSnapshot,
     ValuationComparisonRecord,
 )
+from app.db.models.authentication import KisAccessToken
 from app.db.models.backtest import BacktestRun
 from app.db.models.disclosure import Disclosure
 from app.db.models.event import (
@@ -60,6 +61,7 @@ __all__ = [
     "ForcedFilterResult",
     "IndexDaily",
     "InvestorFlow",
+    "KisAccessToken",
     "MarketContributionRecord",
     "MarketMetricRecord",
     "MarketRegimeSnapshot",

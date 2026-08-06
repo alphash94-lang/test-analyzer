@@ -7,7 +7,11 @@ from decimal import Decimal
 from hashlib import sha256
 
 from app.config import Settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.market_analysis import (
     BreadthAnalysis,
     DividendContagionAnalysis,
@@ -65,7 +69,7 @@ class MarketRegimeService:
         return result
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)
 
     def _analyze(
         self,

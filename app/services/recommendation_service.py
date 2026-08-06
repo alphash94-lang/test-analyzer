@@ -11,7 +11,11 @@ from sqlalchemy import select
 from app.config import Settings
 from app.db.models.market import Stock
 from app.db.models.market_analysis import MarketRegimeSnapshot
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.market_analysis import Phase3AnalysisResult
 from app.models.metadata import DataState, DataTiming
 from app.models.recommendation import (
@@ -433,16 +437,27 @@ class RecommendationService:
             )
             return True
 
-    def positions(self) -> list[dict[str, object]]:
+    def positions(
+        self,
+        *,
+        latest: RecommendationRunResult | None = None,
+    ) -> list[dict[str, object]]:
         with self._sessions() as session:
             profile = self._repository.latest_profile(session)
             if profile is None:
                 return []
             profile_id, profile_value = profile
-            latest = self._repository.latest_run(session)
-            recommendations = (
-                {item.stock_id: item for item in latest.recommendations}
+            selected_latest = (
+                latest
                 if latest is not None
+                else self._repository.latest_run(session)
+            )
+            recommendations = (
+                {
+                    item.stock_id: item
+                    for item in selected_latest.recommendations
+                }
+                if selected_latest is not None
                 else {}
             )
             position_rows = self._repository.positions(
@@ -453,10 +468,10 @@ class RecommendationService:
                 self._repository.verified_reference_prices(
                     session,
                     [stock.id for _, stock in position_rows],
-                    as_of_at=latest.as_of_at,
+                    as_of_at=selected_latest.as_of_at,
                     provider=self._settings.phase3_adjusted_price_provider,
                 )
-                if latest is not None
+                if selected_latest is not None
                 else {}
             )
             results: list[dict[str, object]] = []
@@ -712,4 +727,4 @@ class RecommendationService:
         return quantize_score(min(normalized, Decimal(100)))
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

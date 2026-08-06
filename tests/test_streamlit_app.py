@@ -27,7 +27,6 @@ from app.ui.stock_search import (
     _format_phase2_score,
     _forward_per_from_estimates,
     _stock_chart_rows,
-    _stock_detail_refresh_needs,
 )
 from app.utils.dates import SEOUL
 from app.utils.technical_indicators import AdjustedPricePoint
@@ -69,9 +68,7 @@ def rendered_text(app: AppTest) -> str:
         app.info,
     )
     return "\n".join(
-        str(element.value)
-        for collection in collections
-        for element in collection
+        str(element.value) for collection in collections for element in collection
     )
 
 
@@ -201,35 +198,9 @@ def test_recommendation_display_orders_investment_before_entry_readiness() -> No
     assert ordered == (high_investment, entry_ready_but_weaker)
 
 
-def test_stock_detail_refresh_does_not_repeat_for_verified_no_dividend() -> None:
-    as_of_date = date(2026, 7, 31)
-    snapshot = SimpleNamespace(
-        financial_history=[
-            SimpleNamespace(business_year=year, value=Decimal(1))
-            for year in (2023, 2024, 2025)
-        ],
-        dividends=(),
-    )
-    prices = [
-        SimpleNamespace(
-            trade_date=as_of_date - timedelta(days=125 - index)
-        )
-        for index in range(126)
-    ]
-
-    assert _stock_detail_refresh_needs(
-        snapshot,
-        prices,
-        as_of_date=as_of_date,
-    ) == (False, False)
-
-
 def test_verified_absence_of_going_concern_risk_is_not_shown_as_unknown() -> None:
     assert _format_going_concern("VERIFIED", False) == "중대한 불확실성 없음"
-    assert (
-        _format_going_concern("NOT_VERIFIED", False)
-        == "확인 불가"
-    )
+    assert _format_going_concern("NOT_VERIFIED", False) == "확인 불가"
 
 
 def test_phase2_decision_distinguishes_filter_failure_from_missing_data() -> None:
@@ -251,10 +222,7 @@ def test_phase2_decision_distinguishes_filter_failure_from_missing_data() -> Non
 
     assert _format_phase2_decision(failed) == "강제필터 미통과: 유동성"
     assert _format_phase2_decision(missing) == "데이터 부족으로 계산 불가"
-    assert (
-        _format_phase2_score(None, failed)
-        == "강제필터 미통과로 미산출 (유동성)"
-    )
+    assert _format_phase2_score(None, failed) == "강제필터 미통과로 미산출 (유동성)"
     assert _format_phase2_score(None, missing) == "핵심 데이터 부족으로 미산출"
 
 
@@ -273,10 +241,7 @@ def test_dividend_summary_reports_frequency_and_simple_yield() -> None:
     )
 
     assert _dividend_frequency((annual,)) == "연배당만 확인"
-    assert (
-        _dividend_frequency((annual, first_quarter))
-        == "분기배당 이력 확인"
-    )
+    assert _dividend_frequency((annual, first_quarter)) == "분기배당 이력 확인"
     assert _format_dividend_yield(Decimal(330), latest_price) == "7.88%"
 
 
@@ -616,7 +581,7 @@ def test_stock_search_with_empty_database_shows_connection_error(
 
     assert not app.exception
     assert "실제 KRX 종목 데이터가 없습니다" in text
-    assert "OpenDART: 키 미설정" in text
+    assert "OpenDART: 미설정" in text
     assert "예시 종목을 대신 표시하지 않습니다" in text
     assert "005930" not in text
     assert "78,900" not in text
@@ -666,6 +631,11 @@ def test_stock_search_shows_saved_phase2_evidence_without_fake_score(
     app = AppTest.from_file("app/main.py", default_timeout=15).run()
     app.radio[0].set_value("개별 종목 검색").run()
     app.text_input[0].set_value("000007").run()
+    app.button[0].click().run()
+    assert not app.number_input
+    app.selectbox[0].set_value(app.selectbox[0].options[0]).run()
+    app.session_state["stock-detail-analysis-tab-000007"] = "강제필터·점수"
+    app.run()
     text = rendered_text(app)
 
     assert not app.exception

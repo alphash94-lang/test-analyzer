@@ -22,7 +22,11 @@ from app.db.models.event import (
 from app.db.models.market import PriceDaily, Stock
 from app.db.models.market_analysis import IndexDaily
 from app.db.models.quality import ApiRawResponse
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.ecos import EcosObservation
 from app.models.status import ConnectionState
 from app.repositories.event_watchlist_repository import WATCHLIST_CATEGORY
@@ -654,4 +658,4 @@ def render_krx_preview(settings: Settings) -> None:
                 with history_tab:
                     _render_collection_history(session)
     finally:
-        engine.dispose()
+        dispose_db_engine(engine)

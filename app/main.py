@@ -4,15 +4,6 @@ import streamlit as st
 
 from app.config import get_settings
 from app.logging_config import configure_logging
-from app.ui.backtest import render_backtest
-from app.ui.data_status import render_data_status
-from app.ui.events import render_events
-from app.ui.krx_preview import render_krx_preview
-from app.ui.market_dashboard import render_market_dashboard
-from app.ui.placeholders import render_settings_page, render_unavailable_page
-from app.ui.portfolio import render_portfolio
-from app.ui.recommendations import render_recommendations
-from app.ui.stock_search import render_stock_search
 from app.ui.styles import apply_styles
 
 MENU_PHASES: dict[str, str] = {}
@@ -59,26 +50,48 @@ def main() -> None:
         st.session_state.pop("stock_detail_origin", None)
         st.session_state.pop("stock_detail_recommendation", None)
         st.session_state.pop("stock_search_query", None)
+        st.session_state.pop("stock_search_input", None)
+        st.session_state.pop("stock_detail_selected_label", None)
 
     if selected == "데이터 연결상태":
+        from app.ui.data_status import render_data_status
+
         render_data_status(settings)
     elif selected == STOCK_SEARCH_MENU:
+        from app.ui.stock_search import render_stock_search
+
         render_stock_search(settings)
     elif selected == "시장국면 대시보드":
+        from app.ui.market_dashboard import render_market_dashboard
+
         render_market_dashboard(settings)
     elif selected == RECOMMENDATIONS_MENU:
+        from app.ui.recommendations import render_recommendations
+
         render_recommendations(settings)
     elif selected == "포트폴리오":
+        from app.ui.portfolio import render_portfolio
+
         render_portfolio(settings)
     elif selected == "공시·뉴스":
+        from app.ui.events import render_events
+
         render_events(settings)
     elif selected == "백테스트":
+        from app.ui.backtest import render_backtest
+
         render_backtest(settings)
     elif selected == API_PREVIEW_MENU:
+        from app.ui.krx_preview import render_krx_preview
+
         render_krx_preview(settings)
     elif selected == "설정":
+        from app.ui.placeholders import render_settings_page
+
         render_settings_page()
     else:
+        from app.ui.placeholders import render_unavailable_page
+
         render_unavailable_page(selected, MENU_PHASES[selected])
 
 

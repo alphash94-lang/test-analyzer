@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.backtest import BacktestDataset, BacktestResult, BacktestRules
 from app.repositories.backtest_repository import BacktestRepository
 from app.services.backtest_calculator import calculate_backtest
@@ -47,4 +51,4 @@ class BacktestService:
             return self._repository.latest(session)
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

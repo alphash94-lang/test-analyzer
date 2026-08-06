@@ -123,6 +123,7 @@ class PriceDaily(Base, CreatedAtMixin, SourceMetadataMixin):
             name="uq_price_daily_source",
         ),
         Index("ix_price_daily_trade_date", "trade_date"),
+        Index("ix_price_daily_stock_trade", "stock_id", "trade_date"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

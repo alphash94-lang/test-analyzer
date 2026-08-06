@@ -13,7 +13,11 @@ from sqlalchemy import func, select
 
 from app.config import Settings
 from app.db.models.market import PriceDaily, Stock
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.market_analysis import MarketRegime, ShockClassification
 from app.models.metadata import DataState
 from app.models.realtime_market import (
@@ -95,7 +99,7 @@ def realtime_market_constituents(
                 for symbol, (name, market_cap) in list(latest_by_symbol.items())[:limit]
             )
     finally:
-        engine.dispose()
+        dispose_db_engine(engine)
 
 
 async def refresh_realtime_stock_overlay(

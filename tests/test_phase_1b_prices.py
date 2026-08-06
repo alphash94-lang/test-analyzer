@@ -273,6 +273,7 @@ def test_stock_search_displays_only_stored_official_close(
     app = AppTest.from_file("app/main.py", default_timeout=15).run()
     app.radio[0].set_value("개별 종목 검색").run()
     app.text_input[0].set_value("000001").run()
+    app.button[0].click().run()
 
     assert not app.exception
     frame = app.dataframe[0].value

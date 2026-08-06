@@ -17,7 +17,7 @@ from tests.helpers import migrate_database
 
 def test_model_metadata_contains_required_tables() -> None:
     assert REQUIRED_TABLES <= set(Base.metadata.tables)
-    assert len(REQUIRED_TABLES) == 37
+    assert len(REQUIRED_TABLES) == 38
 
 
 def test_money_and_missing_values_use_numeric_nullable_columns() -> None:
@@ -45,7 +45,7 @@ def test_alembic_upgrade_creates_required_schema(
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "v8k1l2m3n4o5"
+            == "x1n4o5p6q7r8"
         )
         watchlist_columns = {
             column["name"]
@@ -57,6 +57,16 @@ def test_alembic_upgrade_creates_required_schema(
             for column in inspect(engine).get_columns("price_daily")
         }
         assert "previous_day_change" in price_columns
+        token_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("kis_access_tokens")
+        }
+        assert token_columns == {
+            "credential_fingerprint",
+            "encrypted_token",
+            "expires_at",
+            "updated_at",
+        }
         stock_columns = {
             column["name"] for column in inspect(engine).get_columns("stocks")
         }

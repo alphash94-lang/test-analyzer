@@ -13,7 +13,11 @@ from app.db.models.market_analysis import (
     MarketContributionRecord,
     MarketMetricRecord,
 )
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.metadata import DataState
 from app.models.realtime_market import RealtimeMarketSnapshot
 from app.models.status import ConnectionState
@@ -811,4 +815,4 @@ def render_market_dashboard(settings: Settings) -> None:
                     )
             _render_anomaly_report(anomalies, key="daily_market_anomalies")
     finally:
-        engine.dispose()
+        dispose_db_engine(engine)

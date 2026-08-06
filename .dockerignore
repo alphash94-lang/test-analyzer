@@ -1,4 +1,6 @@
 .env*
+.git/
+.github/
 .pytest*
 .ruff_cache/
 .venv/
@@ -11,3 +13,4 @@ docs/
 outputs/
 tests/
 work/
+.vercel/

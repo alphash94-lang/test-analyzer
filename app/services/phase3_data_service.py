@@ -8,7 +8,11 @@ from sqlalchemy import func, select
 from app.config import Settings
 from app.db.models.market import PriceDaily, Stock, StockClassification
 from app.db.models.market_analysis import IndexDaily
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.metadata import DataState
 from app.providers.base import ApiResponse
 from app.providers.kis_master import (
@@ -331,4 +335,4 @@ class Phase3DataService:
             )
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

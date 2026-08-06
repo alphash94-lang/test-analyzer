@@ -7,7 +7,11 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db.models.market import Stock
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.scoring import Phase2Result
 from app.repositories.scoring_repository import ScoringRepository
 from app.services.phase2_input_service import Phase2InputAssembler
@@ -72,4 +76,4 @@ class Phase2ScoringService:
             return self._repository.latest(session, stock_id)
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

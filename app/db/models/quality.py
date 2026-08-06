@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Index,
     Integer,
     String,
     Text,
@@ -32,6 +33,12 @@ class ApiRawResponse(Base):
             "request_params_hash",
             "response_hash",
             name="uq_api_raw_response_content",
+        ),
+        Index(
+            "ix_api_raw_provider_received",
+            "provider",
+            "received_at",
+            "id",
         ),
     )
 

@@ -12,7 +12,11 @@ from app.db.models.disclosure import Disclosure
 from app.db.models.event import EventRecord, NewsArticle
 from app.db.models.financial import FinancialAccount, FinancialStatement
 from app.db.models.market import PriceDaily
-from app.db.session import create_db_engine, create_session_factory
+from app.db.session import (
+    create_db_engine,
+    create_session_factory,
+    dispose_db_engine,
+)
 from app.models.metadata import DataState
 from app.models.recommendation import (
     RecommendationCategory,
@@ -823,4 +827,4 @@ class IntegratedRecommendationService:
         return trends
 
     def close(self) -> None:
-        self._engine.dispose()
+        dispose_db_engine(self._engine)

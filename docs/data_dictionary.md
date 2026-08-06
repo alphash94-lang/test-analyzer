@@ -58,6 +58,19 @@
   `severity`, `data_state`, `message`, `detected_at`, `resolved_at`,
   `context`
 
+### `kis_access_tokens`
+
+Vercel 인스턴스들이 24시간 유효한 KIS 접근 토큰을 공유하기 위한 운영
+캐시다.
+
+- 핵심 필드: `credential_fingerprint`, `encrypted_token`, `expires_at`,
+  `updated_at`
+- 앱키와 앱시크릿 원문은 저장하지 않고 두 값의 SHA-256 지문만 기본키로
+  사용한다.
+- 접근 토큰은 앱 자격증명에서 파생한 키로 AES-GCM 인증 암호화하여 저장한다.
+- 만료 5분 전부터 새 토큰으로 교체하며 PostgreSQL advisory lock으로 동일
+  자격증명의 동시 재발급을 직렬화한다.
+
 ## 종목·분류·시장상태
 
 ### `stocks`
