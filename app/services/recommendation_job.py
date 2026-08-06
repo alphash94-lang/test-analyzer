@@ -6,7 +6,7 @@ from threading import Lock, Thread
 from typing import Any
 
 from app.config import Settings
-from app.models.portfolio import PortfolioProfile
+from app.models.recommendation import PortfolioProfile
 from app.services.recommendation_service import RecommendationService
 
 
