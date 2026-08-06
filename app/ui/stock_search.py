@@ -2344,8 +2344,8 @@ def render_stock_search(settings: Settings) -> None:
         "검색과 분리된 관리 작업에서 실행합니다."
     )
     refresh_detail_data = st.button(
-        "선택 종목 최신 데이터 수집",
-        help="DART 재무·배당·감사자료와 KIS 조정주가를 선택 종목 기준으로 갱신합니다.",
+        "선택 종목 Phase 2 빠른 수집",
+        help="Phase 2에 필요한 최신 DART 재무자료와 KIS 가격 이력만 우선 갱신합니다.",
         width="stretch",
     )
     if refresh_detail_data:
@@ -2357,19 +2357,19 @@ def render_stock_search(settings: Settings) -> None:
             financial_summary = await analysis_service.refresh(
                 symbol=selected_symbol,
                 as_of_date=now_kst().date(),
-                years=5,
-                incremental=False,
+                years=2,
+                incremental=True,
             )
-            refresh_progress.caption("DART 재무·배당·감사자료 수집 완료 · KIS 조정주가 수집 중")
+            refresh_progress.caption("최근 2년 DART 재무·배당자료 수집 완료 · KIS 가격 이력 수집 중")
             price_summary = await price_service.refresh_adjusted_history(
                 symbol=selected_symbol,
                 as_of_date=now_kst().date(),
-                lookback_days=420,
+                lookback_days=120,
             )
             return financial_summary, price_summary
 
         try:
-            with st.spinner(f"{selected_symbol} 선택 종목 데이터를 수집하는 중입니다..."):
+            with st.spinner(f"{selected_symbol} Phase 2 빠른 데이터를 수집하는 중입니다..."):
                 financial_summary, price_summary = asyncio.run(
                     refresh_selected_data()
                 )
