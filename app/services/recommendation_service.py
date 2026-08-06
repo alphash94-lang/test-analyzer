@@ -52,7 +52,7 @@ from app.services.scoring_rules import phase2_rules_from_settings
 from app.services.scoring_service import evaluate_phase2
 from app.utils.dates import ensure_kst, now_kst, restore_database_kst
 
-ProgressCallback = Callable[[int, int, str, str], None]
+ProgressCallback = Callable[[int, int, str, str, str], None]
 
 
 def _canonical_hash(payload: object) -> str:
@@ -276,6 +276,7 @@ class RecommendationService:
                         processed,
                         total,
                         stock.symbol,
+                        stock.name_ko,
                         decision.category.value,
                     )
 

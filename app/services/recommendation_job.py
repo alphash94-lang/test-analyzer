@@ -16,6 +16,7 @@ class RecommendationJobSnapshot:
     processed: int = 0
     total: int = 0
     symbol: str = ""
+    name: str = ""
     category: str = ""
     error: str | None = None
     result: Any | None = None
@@ -60,13 +61,20 @@ class RecommendationJobManager:
     ) -> None:
         service = RecommendationService(settings)
 
-        def progress(processed: int, total: int, symbol: str, category: str) -> None:
+        def progress(
+            processed: int,
+            total: int,
+            symbol: str,
+            name: str,
+            category: str,
+        ) -> None:
             with self._lock:
                 self._snapshot = RecommendationJobSnapshot(
                     status="running",
                     processed=processed,
                     total=total,
                     symbol=symbol,
+                    name=name,
                     category=category,
                 )
 

@@ -1049,7 +1049,7 @@ def render_recommendations(settings: Settings) -> None:
                 progress,
                 text=(
                     f"전체 추천 분석 진행 중 · {job.processed}/{job.total} · "
-                    f"{job.symbol}"
+                    f"{job.symbol} · {job.name} · {job.category}"
                 ),
             )
             st.caption("분석은 백그라운드에서 계속 진행되며 화면이 자동 갱신됩니다.")
@@ -1071,6 +1071,7 @@ def render_recommendations(settings: Settings) -> None:
                 processed: int,
                 total: int,
                 symbol: str,
+                name: str,
                 category: str,
             ) -> None:
                 progress_bar.progress(
